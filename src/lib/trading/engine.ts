@@ -30,6 +30,29 @@ export interface Candle {
   c: number;
 }
 
+/** Minimal quote source the Account needs. */
+export interface Quotes {
+  price: Record<string, number>;
+  bid(sym: string): number;
+  ask(sym: string): number;
+}
+
+/** Everything the terminal UI needs from a market data source. */
+export interface Feed extends Quotes {
+  instruments: Instrument[];
+  open: Record<string, number>;
+  candles: Record<string, Candle[]>;
+  spread(sym: string): number;
+  changePct(sym: string): number;
+  tick(): void;
+  dispose(): void;
+}
+
+let registry: Instrument[] = UNIVERSE;
+export function registerInstruments(list: Instrument[]): void {
+  registry = list;
+}
+
 export const TICKS_PER_CANDLE = 6;
 const HISTORY = 160;
 
@@ -40,7 +63,8 @@ function gauss(): number {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
-export class Market {
+export class Market implements Feed {
+  instruments = UNIVERSE;
   price: Record<string, number> = {};
   open: Record<string, number> = {};
   candles: Record<string, Candle[]> = {};
@@ -93,6 +117,8 @@ export class Market {
       }
     }
   }
+
+  dispose(): void {}
 
   spread(sym: string): number {
     return this.price[sym] * 0.0002;
@@ -150,20 +176,20 @@ export class Account {
   private nextOrder = 1;
   private nextFill = 1;
 
-  equity(m: Market): number {
+  equity(m: Quotes): number {
     let e = this.cash;
     for (const [sym, p] of Object.entries(this.positions)) e += p.qty * m.price[sym];
     return e;
   }
 
-  unrealized(m: Market): number {
+  unrealized(m: Quotes): number {
     let u = 0;
     for (const [sym, p] of Object.entries(this.positions)) u += p.qty * (m.price[sym] - p.avg);
     return u;
   }
 
   /** Returns an error string, or null on success. */
-  submit(m: Market, o: Omit<Order, "id" | "ts">): string | null {
+  submit(m: Quotes, o: Omit<Order, "id" | "ts">): string | null {
     if (!m.price[o.sym]) return `Unknown symbol ${o.sym}`;
     if (!(o.qty > 0) || !isFinite(o.qty)) return "Quantity must be greater than 0";
     if (o.type === "LMT" && !(o.limit && o.limit > 0)) return "Limit orders need a positive price";
@@ -197,7 +223,7 @@ export class Account {
   }
 
   /** Fill any resting limit orders that are now marketable. */
-  match(m: Market): void {
+  match(m: Quotes): void {
     for (const o of [...this.orders]) {
       const px = o.side === "BUY" ? m.ask(o.sym) : m.bid(o.sym);
       const hit = o.side === "BUY" ? px <= o.limit! : px >= o.limit!;
@@ -247,5 +273,5 @@ export function fmtQty(n: number): string {
   return n.toLocaleString("en-US", { maximumFractionDigits: 6 });
 }
 export function dpFor(sym: string): number {
-  return UNIVERSE.find((i) => i.sym === sym)?.dp ?? 2;
+  return registry.find((i) => i.sym === sym)?.dp ?? 2;
 }

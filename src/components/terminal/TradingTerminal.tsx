@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BinanceMarket } from "@/lib/trading/binance";
 import {
   Account,
   Market,
-  UNIVERSE,
   START_CASH,
+  type Feed,
   dpFor,
   fmt,
   fmtQty,
@@ -21,7 +22,7 @@ type Tab = "positions" | "orders" | "fills";
 
 // ─── Candlestick chart ──────────────────────────────────────────────────────
 
-function Chart({ market, sym }: { market: Market; sym: string }) {
+function Chart({ market, sym }: { market: Feed; sym: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const mouse = useRef<{ x: number; y: number } | null>(null);
   const [, bump] = useState(0);
@@ -169,11 +170,11 @@ function Chart({ market, sym }: { market: Market; sym: string }) {
 
 // ─── Order book (synthetic depth around the current price) ──────────────────
 
-function OrderBook({ market, sym, tick }: { market: Market; sym: string; tick: number }) {
+function OrderBook({ market, sym, tick }: { market: Feed; sym: string; tick: number }) {
   const dp = dpFor(sym);
   const bid = market.bid(sym);
   const ask = market.ask(sym);
-  const inc = market.spread(sym);
+  const inc = Math.max(market.spread(sym), market.price[sym] * 0.00005);
   const rows = (dir: 1 | -1) =>
     Array.from({ length: 8 }, (_, i) => {
       // stable-ish pseudo size so the book flickers slightly but doesn't jump wildly
@@ -215,10 +216,11 @@ function OrderBook({ market, sym, tick }: { market: Market; sym: string; tick: n
 // ─── Terminal ───────────────────────────────────────────────────────────────
 
 export default function TradingTerminal() {
-  const market = useRef<Market | null>(null);
+  const market = useRef<Feed | null>(null);
+  const [source, setSource] = useState<"loading" | "binance" | "sim">("loading");
   const account = useRef<Account | null>(null);
   const [tick, setTick] = useState(0);
-  const [sym, setSym] = useState("AAPL");
+  const [sym, setSym] = useState("");
   const [side, setSide] = useState<Side>("BUY");
   const [type, setType] = useState<OrderType>("MKT");
   const [qty, setQty] = useState("10");
@@ -234,12 +236,34 @@ export default function TradingTerminal() {
     setLog((l) => [{ t: Date.now(), msg, err }, ...l].slice(0, 60));
   }, []);
 
-  // init on client only (random data must not run during SSR)
+  // init on client only: try Binance public data, fall back to simulation
   useEffect(() => {
-    market.current = new Market();
+    let cancelled = false;
+    let feed: Feed | null = null;
     account.current = new Account();
-    say("Paper trading terminal ready. Prices are simulated. Type `help` for commands.");
-    setTick(1);
+    (async () => {
+      try {
+        const b = new BinanceMarket();
+        await b.init();
+        if (cancelled) return b.dispose();
+        feed = b;
+        setQty("0.01");
+        setSource("binance");
+        say("Connected to Binance public market data. Orders are paper-traded locally. Type `help` for commands.");
+      } catch (e) {
+        if (cancelled) return;
+        feed = new Market();
+        setSource("sim");
+        say(`Could not reach Binance (${(e as Error).message}). Using simulated prices instead.`, true);
+      }
+      market.current = feed;
+      setSym(feed.instruments[0].sym);
+      setTick(1);
+    })();
+    return () => {
+      cancelled = true;
+      feed?.dispose();
+    };
   }, [say]);
 
   useEffect(() => {
@@ -296,7 +320,7 @@ export default function TradingTerminal() {
     if (cmdName === "buy" || cmdName === "sell") {
       const s = known(args[0]);
       const q = parseFloat(args[1]);
-      if (!s) return say(`Usage: ${cmdName} SYMBOL QTY [LIMIT]  (symbols: ${UNIVERSE.map((i) => i.sym).join(", ")})`, true);
+      if (!s) return say(`Usage: ${cmdName} SYMBOL QTY [LIMIT]  (symbols: ${mk.instruments.map((i) => i.sym).join(", ")})`, true);
       if (!(q > 0)) return say("Quantity must be a positive number", true);
       const lim = args[2] ? parseFloat(args[2].replace("@", "")) : undefined;
       if (args[2] && !(lim! > 0)) return say("Limit price must be a positive number", true);
@@ -332,7 +356,7 @@ export default function TradingTerminal() {
     if (cmdName === "clear") return setLog([]);
     if (cmdName === "help") {
       return [
-        "buy|sell SYM QTY [LIMIT]   e.g. buy NVDA 25   |  sell BTC 0.5 70000",
+        "buy|sell SYM QTY [LIMIT]   e.g. buy BTCUSDT 0.01   |  sell ETHUSDT 1 2600",
         "flat SYM                   close the whole position at market",
         "cancel ID | cancel all     cancel working orders",
         "chart SYM                  switch chart/ticket symbol",
@@ -365,7 +389,7 @@ export default function TradingTerminal() {
         <div className="flex items-center gap-2">
           <span className="text-base font-bold tracking-wider text-[#26d07c]">▲ TERMINAL</span>
           <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
-            PAPER · SIMULATED DATA
+            {source === "binance" ? "BINANCE LIVE DATA · PAPER ORDERS" : "PAPER · SIMULATED DATA"}
           </span>
         </div>
         <Stat label="Equity" value={`$${fmt(equity)}`} />
@@ -385,7 +409,7 @@ export default function TradingTerminal() {
         {/* Watchlist */}
         <aside className="bg-[#0b0e14] lg:overflow-y-auto">
           <Panel title="Watchlist" />
-          {UNIVERSE.map((i) => {
+          {m.instruments.map((i) => {
             const ch = m.changePct(i.sym);
             return (
               <button
@@ -526,7 +550,7 @@ export default function TradingTerminal() {
                     setCmd(histIdx.current === -1 ? "" : history.current[histIdx.current]);
                   }
                 }}
-                placeholder="buy AAPL 10   ·   sell BTC 0.5 70000   ·   help"
+                placeholder="buy BTCUSDT 0.01   ·   sell ETHUSDT 1 2600   ·   help"
                 spellCheck={false}
                 autoComplete="off"
                 className="flex-1 bg-transparent text-slate-100 outline-none placeholder:text-slate-600"
@@ -603,7 +627,7 @@ export default function TradingTerminal() {
               {side} {qty || "0"} {sym}
             </button>
           </div>
-          <Panel title="Order book (synthetic)" />
+          <Panel title="Order book (illustrative depth)" />
           <OrderBook market={m} sym={sym} tick={tick} />
         </aside>
       </div>
