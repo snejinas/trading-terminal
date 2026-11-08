@@ -156,6 +156,10 @@ export interface Order {
   ts: number;
 }
 
+/** Fee rates as a fraction of notional (Binance spot standard tier: 0.1% / 0.1%). */
+export const FEE_RATE = { maker: 0.001, taker: 0.001 } as const;
+export type Role = keyof typeof FEE_RATE;
+
 export interface Fill {
   id: number;
   orderId: number;
@@ -166,6 +170,8 @@ export interface Fill {
   pnl: number; // realized P&L on this fill (0 for opening buys)
   levels: number; // book levels consumed; price is the volume-weighted average
   slip: number; // adverse slippage vs. best bid/ask at execution, in price units
+  fee: number; // quote-currency fee charged on this fill
+  role: Role; // taker = executed on submission, maker = filled after resting
   ts: number;
 }
 
@@ -220,7 +226,8 @@ export class Account {
   positions: Record<string, Position> = {};
   orders: Order[] = [];
   fills: Fill[] = [];
-  realized = 0;
+  realized = 0; // net of fees
+  fees = 0; // total fees paid
   private nextOrder = 1;
   private nextFill = 1;
 
@@ -250,8 +257,9 @@ export class Account {
     } else {
       const reserved = this.orders
         .filter((x) => x.side === "BUY")
-        .reduce((s, x) => s + x.qty * (x.limit ?? m.ask(x.sym)), 0);
-      const need = o.type === "LMT" ? o.qty * o.limit! : sweep(m, o.sym, "BUY", o.qty).cost;
+        .reduce((s, x) => s + x.qty * (x.limit ?? m.ask(x.sym)) * (1 + FEE_RATE.taker), 0);
+      const notional = o.type === "LMT" ? o.qty * o.limit! : sweep(m, o.sym, "BUY", o.qty).cost;
+      const need = notional * (1 + FEE_RATE.taker);
       if (need > this.cash - reserved + 1e-6) return "Insufficient buying power";
     }
     if (o.type === "MKT") {
@@ -262,11 +270,11 @@ export class Account {
         return `Not enough visible liquidity: only ${sw.qty} ${o.sym} within the top ${sw.levels} book levels. Reduce size or use a limit order.`;
     }
     const order: Order = { ...o, id: this.nextOrder++, ts: Date.now() };
-    if (order.type === "MKT") {
-      this.execute(m, order);
-    } else {
+    // Whatever executes right now crosses the spread, so it is a taker fill.
+    const done = this.execute(m, order, "taker");
+    if (order.type === "LMT" && done < order.qty - 1e-9) {
+      order.qty -= done;
       this.orders.push(order);
-      this.match(m);
     }
     return null;
   }
@@ -280,34 +288,35 @@ export class Account {
   /** Execute any resting limit orders that are now marketable (partial fills allowed). */
   match(m: Quotes): void {
     for (const o of [...this.orders]) {
-      const filled = this.execute(m, o);
+      const filled = this.execute(m, o, "maker"); // these orders were resting, so they provided liquidity
       if (filled >= o.qty - 1e-9) this.orders = this.orders.filter((x) => x.id !== o.id);
       else if (filled > 0) o.qty -= filled;
     }
   }
 
   /** Sweep the book for `o`, record one VWAP fill, and return the quantity executed. */
-  private execute(m: Quotes, o: Order): number {
+  private execute(m: Quotes, o: Order, role: Role): number {
     const sw = sweep(m, o.sym, o.side, o.qty, o.type === "LMT" ? o.limit : undefined);
     if (sw.qty <= 0) return 0;
-    this.fill(o, sw.avg, sw.qty, sw.levels, Math.abs(sw.avg - sw.best));
+    this.fill(o, sw.avg, sw.qty, sw.levels, Math.abs(sw.avg - sw.best), sw.cost * FEE_RATE[role], role);
     return sw.qty;
   }
 
-  private fill(o: Order, price: number, qty: number, levels: number, slip: number): void {
+  private fill(o: Order, price: number, qty: number, levels: number, slip: number, fee: number, role: Role): void {
     let pnl = 0;
     const pos = this.positions[o.sym] ?? { qty: 0, avg: 0 };
     if (o.side === "BUY") {
       const total = pos.qty + qty;
-      pos.avg = (pos.avg * pos.qty + price * qty) / total;
+      pos.avg = (pos.avg * pos.qty + price * qty + fee) / total; // buy fee is capitalised into cost basis
       pos.qty = total;
-      this.cash -= price * qty;
+      this.cash -= price * qty + fee;
     } else {
-      pnl = (price - pos.avg) * qty;
+      pnl = (price - pos.avg) * qty - fee; // net of the sell-side fee
       pos.qty -= qty;
-      this.cash += price * qty;
+      this.cash += price * qty - fee;
       this.realized += pnl;
     }
+    this.fees += fee;
     if (pos.qty < 1e-9) delete this.positions[o.sym];
     else this.positions[o.sym] = pos;
     this.fills.unshift({
@@ -320,6 +329,8 @@ export class Account {
       pnl,
       levels,
       slip,
+      fee,
+      role,
       ts: Date.now(),
     });
     if (this.fills.length > 200) this.fills.pop();

@@ -7,6 +7,7 @@ import {
   Market,
   START_CASH,
   sweep,
+  FEE_RATE,
   type Fill,
   type Feed,
   dpFor,
@@ -25,7 +26,7 @@ type Tab = "positions" | "orders" | "fills";
 function describeFill(f: Fill): string {
   const dp = dpFor(f.sym);
   const walked = f.levels > 1 ? ` across ${f.levels} levels (slippage ${fmt(f.slip, dp)})` : "";
-  return `${f.side} ${fmtQty(f.qty)} ${f.sym} @ ${fmt(f.price, dp)} avg${walked}`;
+  return `${f.side} ${fmtQty(f.qty)} ${f.sym} @ ${fmt(f.price, dp)} avg${walked}, fee ${fmt(f.fee, 4)} (${f.role})`;
 }
 
 // ─── Candlestick chart ──────────────────────────────────────────────────────
@@ -410,6 +411,9 @@ export default function TradingTerminal() {
     qNum > 0 && !(type === "LMT" && !(limNum > 0))
       ? sweep(m, sym, side, qNum, type === "LMT" ? limNum : undefined)
       : null;
+  const estNotional = est ? est.cost + (type === "LMT" ? (qNum - est.qty) * limNum : 0) : 0;
+  // marketable part pays taker; any remainder would rest and pay maker
+  const estFee = est ? est.cost * FEE_RATE.taker + (estNotional - est.cost) * FEE_RATE.maker : 0;
   const estShort = est ? qNum - est.qty > 1e-9 : false;
 
   return (
@@ -425,7 +429,8 @@ export default function TradingTerminal() {
         <Stat label="Equity" value={`$${fmt(equity)}`} />
         <Stat label="Cash" value={`$${fmt(a.cash)}`} />
         <Stat label="Unrealized" value={sign(unreal)} cls={pnlColor(unreal)} />
-        <Stat label="Realized" value={sign(a.realized)} cls={pnlColor(a.realized)} />
+        <Stat label="Realized (net)" value={sign(a.realized)} cls={pnlColor(a.realized)} />
+        <Stat label="Fees paid" value={`$${fmt(a.fees)}`} />
         <Stat label="Total P&L" value={`${sign(total)} (${sign((total / START_CASH) * 100)}%)`} cls={pnlColor(total)} />
         <button
           onClick={() => setPaused((p) => !p)}
@@ -533,7 +538,7 @@ export default function TradingTerminal() {
             )}
             {tab === "fills" && (
               <Table
-                head={["Time", "Symbol", "Side", "Qty", "Avg price", "Lvls", "Slippage", "Realized"]}
+                head={["Time", "Symbol", "Side", "Qty", "Avg price", "Lvls", "Slippage", "Fee", "Realized"]}
                 empty="No fills yet"
                 rows={a.fills.map((f) => [
                   new Date(f.ts).toLocaleTimeString(),
@@ -543,6 +548,7 @@ export default function TradingTerminal() {
                   fmt(f.price, dpFor(f.sym)),
                   f.levels,
                   fmt(f.slip, dpFor(f.sym)),
+                  `${fmt(f.fee, 4)} ${f.role[0].toUpperCase()}`,
                   f.side === "SELL" ? <span key="p" className={pnlColor(f.pnl)}>{sign(f.pnl)}</span> : "—",
                 ])}
               />
@@ -649,7 +655,11 @@ export default function TradingTerminal() {
             )}
             <div className="flex justify-between text-xs text-slate-400">
               <span>Est. {side === "BUY" ? "cost" : "proceeds"}</span>
-              <span className="text-slate-200">${fmt(est ? est.cost + (type === "LMT" ? (qNum - est.qty) * limNum : 0) : 0)}</span>
+              <span className="text-slate-200">${fmt(side === "BUY" ? estNotional + estFee : estNotional - estFee)}</span>
+            </div>
+            <div className="flex justify-between text-xs text-slate-400">
+              <span>Fee ({(FEE_RATE.taker * 100).toFixed(2)}%)</span>
+              <span className="text-slate-200">${fmt(estFee, 4)}</span>
             </div>
             {est && est.qty > 0 && (
               <div className="flex justify-between text-xs text-slate-400">
