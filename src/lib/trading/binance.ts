@@ -3,7 +3,7 @@
  * Uses the market-data-only hosts, which work without credentials and are not
  * geo-restricted the way api.binance.com can be.
  */
-import { registerInstruments, type BookDepth, type Candle, type Feed, type Instrument } from "./engine";
+import { ImpactBook, registerInstruments, type BookDepth, type Candle, type Feed, type Instrument, type Side } from "./engine";
 
 const REST = "https://data-api.binance.vision/api/v3";
 const WS = "wss://data-stream.binance.vision/stream";
@@ -24,6 +24,7 @@ export class BinanceMarket implements Feed {
   candles: Record<string, Candle[]> = {};
   connected = false;
   private books: Record<string, BookDepth> = {};
+  private impact = new ImpactBook();
   private bids: Record<string, number> = {};
   private asks: Record<string, number> = {};
   private ws: WebSocket | null = null;
@@ -103,13 +104,30 @@ export class BinanceMarket implements Feed {
   }
 
   tick(): void {}
+  /** Latest Binance snapshot minus liquidity our own fills have consumed and not yet recovered. */
   depth(sym: string): BookDepth | null {
-    return this.books[sym] ?? null;
+    const raw = this.books[sym];
+    return raw ? this.impact.adjust(sym, raw) : null;
   }
+  consume(sym: string, side: Side, taken: [number, number][]): void {
+    this.impact.consume(sym, side, taken);
+  }
+  impactActive(sym: string): boolean {
+    return this.impact.has(sym);
+  }
+  // While our fills have depleted the book, the effective touch is the first level with size left.
   bid(sym: string): number {
+    if (this.impact.has(sym)) {
+      const b = this.depth(sym)?.bids[0];
+      if (b) return b[0];
+    }
     return this.bids[sym] ?? this.price[sym];
   }
   ask(sym: string): number {
+    if (this.impact.has(sym)) {
+      const a = this.depth(sym)?.asks[0];
+      if (a) return a[0];
+    }
     return this.asks[sym] ?? this.price[sym];
   }
   spread(sym: string): number {

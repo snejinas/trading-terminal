@@ -37,6 +37,8 @@ export interface Quotes {
   ask(sym: string): number;
   /** Real order-book levels [price, size], best first. Absent for simulated feeds. */
   depth?(sym: string): BookDepth | null;
+  /** Tell the feed our taker fill ate these [price, size] levels, so later sweeps see less liquidity. */
+  consume?(sym: string, side: Side, taken: [number, number][]): void;
 }
 
 /** Everything the terminal UI needs from a market data source. */
@@ -46,6 +48,8 @@ export interface Feed extends Quotes {
   candles: Record<string, Candle[]>;
   spread(sym: string): number;
   changePct(sym: string): number;
+  /** True while this symbol's visible book is still depleted by our own fills. */
+  impactActive?(sym: string): boolean;
   tick(): void;
   dispose(): void;
 }
@@ -53,6 +57,61 @@ export interface Feed extends Quotes {
 export interface BookDepth {
   bids: [number, number][];
   asks: [number, number][];
+}
+
+/** How fast liquidity we consumed comes back (market makers refilling the level). */
+export const IMPACT_HALF_LIFE_MS = 5000;
+
+/**
+ * Remembers liquidity our own taker fills consumed, per symbol/side/price, and subtracts it
+ * from fresh book snapshots. The real book refreshes every 100ms and knows nothing about our
+ * paper fills, so without this overlay every level would instantly "refill". Consumption
+ * decays exponentially. It is keyed by price, so if the market moves to new levels the old
+ * consumption simply no longer applies.
+ */
+export class ImpactBook {
+  private used = new Map<string, { qty: number; t: number }>();
+  constructor(
+    private now: () => number = Date.now,
+    private halfLifeMs: number = IMPACT_HALF_LIFE_MS
+  ) {}
+
+  private cur(e: { qty: number; t: number }): number {
+    return e.qty * Math.pow(0.5, (this.now() - e.t) / this.halfLifeMs);
+  }
+
+  /** An entry is "recovered" once 98% of what it consumed is back; then we stop tracking it. */
+  private alive(e: { qty: number; t: number }): boolean {
+    return this.cur(e) > e.qty * 0.02;
+  }
+
+  /** `side` is the taker's side: BUYs consume asks, SELLs consume bids. */
+  consume(sym: string, side: Side, taken: [number, number][]): void {
+    for (const [p, q] of taken) {
+      const key = `${sym}|${side}|${p}`;
+      const e = this.used.get(key);
+      this.used.set(key, { qty: (e ? this.cur(e) : 0) + q, t: this.now() });
+    }
+  }
+
+  has(sym: string): boolean {
+    for (const [k, e] of this.used) if (k.startsWith(sym + "|") && this.alive(e)) return true;
+    return false;
+  }
+
+  /** Returns a copy of `book` with consumed size removed; fully consumed levels are dropped. */
+  adjust(sym: string, book: BookDepth): BookDepth {
+    for (const [k, e] of this.used) if (!this.alive(e)) this.used.delete(k);
+    if (this.used.size === 0) return book;
+    const net = (levels: [number, number][], side: Side) =>
+      levels
+        .map(([p, s]): [number, number] => {
+          const e = this.used.get(`${sym}|${side}|${p}`);
+          return [p, e ? s - this.cur(e) : s];
+        })
+        .filter(([, s]) => s > 1e-9);
+    return { asks: net(book.asks, "BUY"), bids: net(book.bids, "SELL") };
+  }
 }
 
 let registry: Instrument[] = UNIVERSE;
@@ -181,6 +240,7 @@ export interface Sweep {
   levels: number;
   avg: number;
   best: number; // best price on the contra side
+  taken: [number, number][]; // [price, size] actually consumed at each level
 }
 
 /**
@@ -191,27 +251,26 @@ export interface Sweep {
 export function sweep(m: Quotes, sym: string, side: Side, qty: number, limit?: number): Sweep {
   const book = m.depth?.(sym);
   const best = side === "BUY" ? m.ask(sym) : m.bid(sym);
-  const levels: [number, number][] =
-    book && (side === "BUY" ? book.asks : book.bids).length
-      ? side === "BUY"
-        ? book.asks
-        : book.bids
-      : [[best, Infinity]];
+  // No depth data at all -> top-of-book with unlimited size. Depth present but empty (fully
+  // consumed by our own fills) means there is genuinely nothing to hit right now.
+  const levels: [number, number][] = book ? (side === "BUY" ? book.asks : book.bids) : [[best, Infinity]];
   let left = qty;
   let cost = 0;
   let used = 0;
   let n = 0;
+  const taken: [number, number][] = [];
   for (const [px, size] of levels) {
     if (limit !== undefined && (side === "BUY" ? px > limit : px < limit)) break;
     const take = Math.min(left, size);
     if (take <= 0) break;
     cost += take * px;
     used += take;
+    taken.push([px, take]);
     left -= take;
     n++;
     if (left <= 1e-12) break;
   }
-  return { qty: used, cost, levels: n, avg: used > 0 ? cost / used : best, best: levels[0][0] };
+  return { qty: used, cost, levels: n, avg: used > 0 ? cost / used : best, best: levels[0]?.[0] ?? best, taken };
 }
 
 export interface Position {
@@ -372,6 +431,8 @@ export class Account {
     const sw = sweep(m, o.sym, o.side, o.qty, o.type === "LMT" ? o.limit : undefined);
     if (sw.qty <= 0) return 0;
     this.fill(o, sw.avg, sw.qty, sw.levels, Math.abs(sw.avg - sw.best), sw.cost * FEE_RATE[role], role);
+    // Only a taker fill eats visible liquidity; a maker fill means someone else hit our resting order.
+    if (role === "taker") m.consume?.(o.sym, o.side, sw.taken);
     return sw.qty;
   }
 

@@ -730,7 +730,13 @@ export default function TradingTerminal() {
               {side} {qty || "0"} {sym}
             </button>
           </div>
-          <Panel title={m.depth?.(sym) ? "Order book · Binance live (top 8)" : "Order book (illustrative depth)"} />
+          <Panel
+            title={
+              m.depth?.(sym)
+                ? `Order book · Binance live (top 8)${m.impactActive?.(sym) ? " · net of your fills" : ""}`
+                : "Order book (illustrative depth)"
+            }
+          />
           <OrderBook market={m} sym={sym} tick={tick} />
         </aside>
       </div>
