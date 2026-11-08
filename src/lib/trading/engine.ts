@@ -35,6 +35,8 @@ export interface Quotes {
   price: Record<string, number>;
   bid(sym: string): number;
   ask(sym: string): number;
+  /** Real order-book levels [price, size], best first. Absent for simulated feeds. */
+  depth?(sym: string): BookDepth | null;
 }
 
 /** Everything the terminal UI needs from a market data source. */
@@ -44,8 +46,6 @@ export interface Feed extends Quotes {
   candles: Record<string, Candle[]>;
   spread(sym: string): number;
   changePct(sym: string): number;
-  /** Real order-book levels [price, size], best first. Absent for simulated feeds. */
-  depth?(sym: string): BookDepth | null;
   tick(): void;
   dispose(): void;
 }
@@ -164,7 +164,48 @@ export interface Fill {
   qty: number;
   price: number;
   pnl: number; // realized P&L on this fill (0 for opening buys)
+  levels: number; // book levels consumed; price is the volume-weighted average
+  slip: number; // adverse slippage vs. best bid/ask at execution, in price units
   ts: number;
+}
+
+export interface Sweep {
+  qty: number; // quantity that can execute now (<= requested)
+  cost: number; // total notional of that quantity
+  levels: number;
+  avg: number;
+  best: number; // best price on the contra side
+}
+
+/**
+ * Walk the contra side of the book, level by level, until `qty` is filled or
+ * the limit price (if any) stops us. Without depth data (simulated feed, or
+ * before the first snapshot) top-of-book is treated as unlimited size.
+ */
+export function sweep(m: Quotes, sym: string, side: Side, qty: number, limit?: number): Sweep {
+  const book = m.depth?.(sym);
+  const best = side === "BUY" ? m.ask(sym) : m.bid(sym);
+  const levels: [number, number][] =
+    book && (side === "BUY" ? book.asks : book.bids).length
+      ? side === "BUY"
+        ? book.asks
+        : book.bids
+      : [[best, Infinity]];
+  let left = qty;
+  let cost = 0;
+  let used = 0;
+  let n = 0;
+  for (const [px, size] of levels) {
+    if (limit !== undefined && (side === "BUY" ? px > limit : px < limit)) break;
+    const take = Math.min(left, size);
+    if (take <= 0) break;
+    cost += take * px;
+    used += take;
+    left -= take;
+    n++;
+    if (left <= 1e-12) break;
+  }
+  return { qty: used, cost, levels: n, avg: used > 0 ? cost / used : best, best: levels[0][0] };
 }
 
 export interface Position {
@@ -207,15 +248,22 @@ export class Account {
         .reduce((s, x) => s + x.qty, 0);
       if (o.qty > held - reserved + 1e-9) return `Insufficient position (shorting is disabled): ${held - reserved} available`;
     } else {
-      const px = o.type === "LMT" ? o.limit! : m.ask(o.sym);
       const reserved = this.orders
         .filter((x) => x.side === "BUY")
         .reduce((s, x) => s + x.qty * (x.limit ?? m.ask(x.sym)), 0);
-      if (o.qty * px > this.cash - reserved + 1e-6) return "Insufficient buying power";
+      const need = o.type === "LMT" ? o.qty * o.limit! : sweep(m, o.sym, "BUY", o.qty).cost;
+      if (need > this.cash - reserved + 1e-6) return "Insufficient buying power";
+    }
+    if (o.type === "MKT") {
+      // Market orders are all-or-none against the visible book: no partial fills, no guessing
+      // at liquidity we can't see.
+      const sw = sweep(m, o.sym, o.side, o.qty);
+      if (sw.qty < o.qty - 1e-9)
+        return `Not enough visible liquidity: only ${sw.qty} ${o.sym} within the top ${sw.levels} book levels. Reduce size or use a limit order.`;
     }
     const order: Order = { ...o, id: this.nextOrder++, ts: Date.now() };
     if (order.type === "MKT") {
-      this.fill(order, order.side === "BUY" ? m.ask(order.sym) : m.bid(order.sym));
+      this.execute(m, order);
     } else {
       this.orders.push(order);
       this.match(m);
@@ -229,30 +277,35 @@ export class Account {
     return before - this.orders.length;
   }
 
-  /** Fill any resting limit orders that are now marketable. */
+  /** Execute any resting limit orders that are now marketable (partial fills allowed). */
   match(m: Quotes): void {
     for (const o of [...this.orders]) {
-      const px = o.side === "BUY" ? m.ask(o.sym) : m.bid(o.sym);
-      const hit = o.side === "BUY" ? px <= o.limit! : px >= o.limit!;
-      if (hit) {
-        this.orders = this.orders.filter((x) => x.id !== o.id);
-        this.fill(o, o.limit!);
-      }
+      const filled = this.execute(m, o);
+      if (filled >= o.qty - 1e-9) this.orders = this.orders.filter((x) => x.id !== o.id);
+      else if (filled > 0) o.qty -= filled;
     }
   }
 
-  private fill(o: Order, price: number): void {
+  /** Sweep the book for `o`, record one VWAP fill, and return the quantity executed. */
+  private execute(m: Quotes, o: Order): number {
+    const sw = sweep(m, o.sym, o.side, o.qty, o.type === "LMT" ? o.limit : undefined);
+    if (sw.qty <= 0) return 0;
+    this.fill(o, sw.avg, sw.qty, sw.levels, Math.abs(sw.avg - sw.best));
+    return sw.qty;
+  }
+
+  private fill(o: Order, price: number, qty: number, levels: number, slip: number): void {
     let pnl = 0;
     const pos = this.positions[o.sym] ?? { qty: 0, avg: 0 };
     if (o.side === "BUY") {
-      const total = pos.qty + o.qty;
-      pos.avg = (pos.avg * pos.qty + price * o.qty) / total;
+      const total = pos.qty + qty;
+      pos.avg = (pos.avg * pos.qty + price * qty) / total;
       pos.qty = total;
-      this.cash -= price * o.qty;
+      this.cash -= price * qty;
     } else {
-      pnl = (price - pos.avg) * o.qty;
-      pos.qty -= o.qty;
-      this.cash += price * o.qty;
+      pnl = (price - pos.avg) * qty;
+      pos.qty -= qty;
+      this.cash += price * qty;
       this.realized += pnl;
     }
     if (pos.qty < 1e-9) delete this.positions[o.sym];
@@ -262,9 +315,11 @@ export class Account {
       orderId: o.id,
       sym: o.sym,
       side: o.side,
-      qty: o.qty,
+      qty,
       price,
       pnl,
+      levels,
+      slip,
       ts: Date.now(),
     });
     if (this.fills.length > 200) this.fills.pop();

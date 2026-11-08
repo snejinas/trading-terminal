@@ -6,6 +6,8 @@ import {
   Account,
   Market,
   START_CASH,
+  sweep,
+  type Fill,
   type Feed,
   dpFor,
   fmt,
@@ -19,6 +21,12 @@ const UP = "#26d07c";
 const DOWN = "#ff5b6e";
 
 type Tab = "positions" | "orders" | "fills";
+
+function describeFill(f: Fill): string {
+  const dp = dpFor(f.sym);
+  const walked = f.levels > 1 ? ` across ${f.levels} levels (slippage ${fmt(f.slip, dp)})` : "";
+  return `${f.side} ${fmtQty(f.qty)} ${f.sym} @ ${fmt(f.price, dp)} avg${walked}`;
+}
 
 // ─── Candlestick chart ──────────────────────────────────────────────────────
 
@@ -295,12 +303,9 @@ export default function TradingTerminal() {
       const a = account.current;
       if (!m || !a) return;
       m.tick();
-      const before = a.fills.length;
+      const lastId = a.fills[0]?.id ?? 0;
       a.match(m);
-      if (a.fills.length > before) {
-        for (const f of a.fills.slice(0, a.fills.length - before).reverse())
-          say(`Filled #${f.orderId}: ${f.side} ${fmtQty(f.qty)} ${f.sym} @ ${fmt(f.price, dpFor(f.sym))}`);
-      }
+      for (const f of a.fills.filter((x) => x.id > lastId).reverse()) say(`Filled #${f.orderId}: ${describeFill(f)}`);
       setTick((t) => t + 1);
     }, TICK_MS);
     return () => clearInterval(id);
@@ -313,15 +318,13 @@ export default function TradingTerminal() {
     (s: string, sd: Side, ty: OrderType, q: number, lim?: number) => {
       const mk = market.current!;
       const ac = account.current!;
-      const before = ac.fills.length;
+      const lastId = ac.fills[0]?.id ?? 0;
+      const knownOrders = new Set(ac.orders.map((o) => o.id));
       const err = ac.submit(mk, { sym: s, side: sd, type: ty, qty: q, limit: lim });
       if (err) return say(err, true);
-      if (ac.fills.length > before) {
-        const f = ac.fills[0];
-        say(`Filled: ${f.side} ${fmtQty(f.qty)} ${f.sym} @ ${fmt(f.price, dpFor(f.sym))}`);
-      } else {
-        say(`Working: ${sd} ${fmtQty(q)} ${s} LMT @ ${fmt(lim!, dpFor(s))}`);
-      }
+      for (const f of ac.fills.filter((x) => x.id > lastId).reverse()) say(`Filled: ${describeFill(f)}`);
+      const rest = ac.orders.find((o) => !knownOrders.has(o.id));
+      if (rest) say(`Working #${rest.id}: ${sd} ${fmtQty(rest.qty)} ${s} LMT @ ${fmt(lim!, dpFor(s))}`);
       setTick((t) => t + 1);
     },
     [say]
@@ -402,7 +405,12 @@ export default function TradingTerminal() {
   const pnlColor = (v: number) => (v > 0 ? "text-[#26d07c]" : v < 0 ? "text-[#ff5b6e]" : "text-slate-400");
   const sign = (v: number, d = 2) => (v > 0 ? "+" : "") + fmt(v, d);
   const qNum = parseFloat(qty);
-  const estCost = qNum > 0 ? qNum * (type === "LMT" && parseFloat(limit) > 0 ? parseFloat(limit) : refPx) : 0;
+  const limNum = parseFloat(limit);
+  const est =
+    qNum > 0 && !(type === "LMT" && !(limNum > 0))
+      ? sweep(m, sym, side, qNum, type === "LMT" ? limNum : undefined)
+      : null;
+  const estShort = est ? qNum - est.qty > 1e-9 : false;
 
   return (
     <div className="flex min-h-screen flex-col bg-[#0b0e14] font-mono text-sm text-slate-200 lg:h-screen lg:overflow-hidden">
@@ -525,7 +533,7 @@ export default function TradingTerminal() {
             )}
             {tab === "fills" && (
               <Table
-                head={["Time", "Symbol", "Side", "Qty", "Price", "Realized"]}
+                head={["Time", "Symbol", "Side", "Qty", "Avg price", "Lvls", "Slippage", "Realized"]}
                 empty="No fills yet"
                 rows={a.fills.map((f) => [
                   new Date(f.ts).toLocaleTimeString(),
@@ -533,6 +541,8 @@ export default function TradingTerminal() {
                   <span key="s" style={{ color: f.side === "BUY" ? UP : DOWN }}>{f.side}</span>,
                   fmtQty(f.qty),
                   fmt(f.price, dpFor(f.sym)),
+                  f.levels,
+                  fmt(f.slip, dpFor(f.sym)),
                   f.side === "SELL" ? <span key="p" className={pnlColor(f.pnl)}>{sign(f.pnl)}</span> : "—",
                 ])}
               />
@@ -639,8 +649,21 @@ export default function TradingTerminal() {
             )}
             <div className="flex justify-between text-xs text-slate-400">
               <span>Est. {side === "BUY" ? "cost" : "proceeds"}</span>
-              <span className="text-slate-200">${fmt(estCost)}</span>
+              <span className="text-slate-200">${fmt(est ? est.cost + (type === "LMT" ? (qNum - est.qty) * limNum : 0) : 0)}</span>
             </div>
+            {est && est.qty > 0 && (
+              <div className="flex justify-between text-xs text-slate-400">
+                <span>Avg fill · {est.levels} lvl{est.levels === 1 ? "" : "s"}</span>
+                <span className="text-slate-200">{fmt(est.avg, dp)}</span>
+              </div>
+            )}
+            {estShort && !(type === "LMT" && est!.qty === 0) && (
+              <div className="text-[11px] text-amber-300">
+                {type === "MKT"
+                  ? `Only ${fmtQty(est!.qty)} available in the visible book — a market order this size will be rejected.`
+                  : `Only ${fmtQty(est!.qty)} is marketable now; the rest would rest as a limit order.`}
+              </div>
+            )}
             <button
               onClick={() => place(sym, side, type, parseFloat(qty), type === "LMT" ? parseFloat(limit) : undefined)}
               className="w-full rounded py-2.5 font-bold text-[#0b0e14]"
