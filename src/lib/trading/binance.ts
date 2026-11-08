@@ -3,7 +3,7 @@
  * Uses the market-data-only hosts, which work without credentials and are not
  * geo-restricted the way api.binance.com can be.
  */
-import { registerInstruments, type Candle, type Feed, type Instrument } from "./engine";
+import { registerInstruments, type BookDepth, type Candle, type Feed, type Instrument } from "./engine";
 
 const REST = "https://data-api.binance.vision/api/v3";
 const WS = "wss://data-stream.binance.vision/stream";
@@ -23,6 +23,7 @@ export class BinanceMarket implements Feed {
   open: Record<string, number> = {};
   candles: Record<string, Candle[]> = {};
   connected = false;
+  private books: Record<string, BookDepth> = {};
   private bids: Record<string, number> = {};
   private asks: Record<string, number> = {};
   private ws: WebSocket | null = null;
@@ -53,7 +54,11 @@ export class BinanceMarket implements Feed {
   private connect(): void {
     if (this.disposed) return;
     const streams = this.instruments
-      .flatMap((i) => [`${i.sym.toLowerCase()}@bookTicker`, `${i.sym.toLowerCase()}@kline_1m`])
+      .flatMap((i) => [
+        `${i.sym.toLowerCase()}@bookTicker`,
+        `${i.sym.toLowerCase()}@kline_1m`,
+        `${i.sym.toLowerCase()}@depth10@100ms`, // top-10 levels, full snapshot each push
+      ])
       .join("/");
     const ws = new WebSocket(`${WS}?streams=${streams}`);
     this.ws = ws;
@@ -72,7 +77,11 @@ export class BinanceMarket implements Feed {
       }
       const d = msg.data;
       if (!d) return;
-      if (d.e === "kline") {
+      if (Array.isArray(d.bids) && Array.isArray(d.asks) && msg.stream) {
+        const s = msg.stream.split("@")[0].toUpperCase();
+        const lv = (a: string[][]) => a.map(([p, q]) => [+p, +q] as [number, number]);
+        this.books[s] = { bids: lv(d.bids), asks: lv(d.asks) };
+      } else if (d.e === "kline") {
         const s: string = d.s;
         const k = d.k;
         const c = toCandle([k.t, k.o, k.h, k.l, k.c]);
@@ -94,6 +103,9 @@ export class BinanceMarket implements Feed {
   }
 
   tick(): void {}
+  depth(sym: string): BookDepth | null {
+    return this.books[sym] ?? null;
+  }
   bid(sym: string): number {
     return this.bids[sym] ?? this.price[sym];
   }

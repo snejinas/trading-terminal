@@ -44,8 +44,15 @@ export interface Feed extends Quotes {
   candles: Record<string, Candle[]>;
   spread(sym: string): number;
   changePct(sym: string): number;
+  /** Real order-book levels [price, size], best first. Absent for simulated feeds. */
+  depth?(sym: string): BookDepth | null;
   tick(): void;
   dispose(): void;
+}
+
+export interface BookDepth {
+  bids: [number, number][];
+  asks: [number, number][];
 }
 
 let registry: Instrument[] = UNIVERSE;

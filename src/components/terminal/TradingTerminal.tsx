@@ -174,30 +174,40 @@ function OrderBook({ market, sym, tick }: { market: Feed; sym: string; tick: num
   const dp = dpFor(sym);
   const bid = market.bid(sym);
   const ask = market.ask(sym);
+  const live = market.depth?.(sym) ?? null;
   const inc = Math.max(market.spread(sym), market.price[sym] * 0.00005);
-  const rows = (dir: 1 | -1) =>
-    Array.from({ length: 8 }, (_, i) => {
+  const synth = (dir: 1 | -1) =>
+    Array.from({ length: 8 }, (_, i): [number, number] => {
       // stable-ish pseudo size so the book flickers slightly but doesn't jump wildly
       const seed = Math.sin((i + 1) * 12.9898 + tick * 0.35 * (dir === 1 ? 1 : 1.3)) * 43758.5453;
-      const size = 20 + (seed - Math.floor(seed)) * 480;
-      const price = (dir === 1 ? ask : bid) + dir * i * inc;
-      return { price, size };
+      return [(dir === 1 ? ask : bid) + dir * i * inc, 20 + (seed - Math.floor(seed)) * 480];
     });
-  const asks = rows(1).reverse();
-  const bids = rows(-1);
-  const max = Math.max(...asks.map((r) => r.size), ...bids.map((r) => r.size));
-  const Row = ({ r, color }: { r: { price: number; size: number }; color: string }) => (
+  const askLv = (live ? live.asks.slice(0, 8) : synth(1)).map(([price, size]) => ({ price, size }));
+  const bidLv = (live ? live.bids.slice(0, 8) : synth(-1)).map(([price, size]) => ({ price, size }));
+  // cumulative size so the depth bars read as a depth chart
+  const cum = (rows: { price: number; size: number }[]) => {
+    let t = 0;
+    return rows.map((r) => ({ ...r, total: (t += r.size) }));
+  };
+  const asks = cum(askLv).reverse();
+  const bids = cum(bidLv);
+  const max = Math.max(asks[0]?.total ?? 1, bids[bids.length - 1]?.total ?? 1);
+  const sdp = market.price[sym] >= 1000 ? 4 : market.price[sym] >= 1 ? 3 : 0;
+  const Row = ({ r, color }: { r: { price: number; size: number; total: number }; color: string }) => (
     <div className="relative flex justify-between px-2 py-[2px] text-[11px]">
       <div
         className="absolute inset-y-0 right-0 opacity-15"
-        style={{ width: `${(r.size / max) * 100}%`, background: color }}
+        style={{ width: `${(r.total / max) * 100}%`, background: color }}
       />
       <span style={{ color }} className="relative">
         {fmt(r.price, dp)}
       </span>
-      <span className="relative text-slate-400">{r.size.toFixed(0)}</span>
+      <span className="relative text-slate-400">{fmt(r.size, sdp)}</span>
     </div>
   );
+  const bidVol = bidLv.reduce((s, r) => s + r.size, 0);
+  const askVol = askLv.reduce((s, r) => s + r.size, 0);
+  const imb = bidVol + askVol > 0 ? (bidVol / (bidVol + askVol)) * 100 : 50;
   return (
     <div className="font-mono">
       {asks.map((r, i) => (
@@ -209,6 +219,18 @@ function OrderBook({ market, sym, tick }: { market: Feed; sym: string; tick: num
       {bids.map((r, i) => (
         <Row key={`b${i}`} r={r} color={UP} />
       ))}
+      {live && (
+        <div className="mt-2 px-2">
+          <div className="flex h-1.5 overflow-hidden rounded">
+            <div style={{ width: `${imb}%`, background: UP }} />
+            <div style={{ width: `${100 - imb}%`, background: DOWN }} />
+          </div>
+          <div className="mt-1 flex justify-between text-[10px] text-slate-500">
+            <span>bids {imb.toFixed(0)}%</span>
+            <span>asks {(100 - imb).toFixed(0)}%</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -627,7 +649,7 @@ export default function TradingTerminal() {
               {side} {qty || "0"} {sym}
             </button>
           </div>
-          <Panel title="Order book (illustrative depth)" />
+          <Panel title={m.depth?.(sym) ? "Order book · Binance live (top 8)" : "Order book (illustrative depth)"} />
           <OrderBook market={m} sym={sym} tick={tick} />
         </aside>
       </div>
