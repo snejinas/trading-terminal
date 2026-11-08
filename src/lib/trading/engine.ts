@@ -221,6 +221,21 @@ export interface Position {
 
 export const START_CASH = 100_000;
 
+export interface AccountSnapshot {
+  v: 1;
+  cash: number;
+  positions: Record<string, Position>;
+  orders: Order[];
+  fills: Fill[];
+  realized: number;
+  fees: number;
+  nextOrder: number;
+  nextFill: number;
+}
+
+const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
+const isSide = (x: unknown): x is Side => x === "BUY" || x === "SELL";
+
 export class Account {
   cash = START_CASH;
   positions: Record<string, Position> = {};
@@ -230,6 +245,64 @@ export class Account {
   fees = 0; // total fees paid
   private nextOrder = 1;
   private nextFill = 1;
+
+  snapshot(): AccountSnapshot {
+    return {
+      v: 1,
+      cash: this.cash,
+      positions: this.positions,
+      orders: this.orders,
+      fills: this.fills,
+      realized: this.realized,
+      fees: this.fees,
+      nextOrder: this.nextOrder,
+      nextFill: this.nextFill,
+    };
+  }
+
+  /** Cheap change detector so callers only write storage when something actually changed. */
+  signature(): string {
+    return [this.nextOrder, this.nextFill, this.orders.length, this.cash, this.realized, this.fees].join("|");
+  }
+
+  /**
+   * Rebuild an account from untrusted stored JSON. Returns null if the data is malformed.
+   * Positions/orders for symbols the current feed doesn't know are dropped and counted.
+   */
+  static restore(raw: unknown, validSyms: Set<string>): { account: Account; dropped: number } | null {
+    const r = raw as Partial<AccountSnapshot> | null;
+    if (!r || typeof r !== "object" || r.v !== 1) return null;
+    if (![r.cash, r.realized, r.fees, r.nextOrder, r.nextFill].every(isNum)) return null;
+    if (!r.positions || typeof r.positions !== "object" || !Array.isArray(r.orders) || !Array.isArray(r.fills)) return null;
+
+    const a = new Account();
+    let dropped = 0;
+    a.cash = r.cash!;
+    a.realized = r.realized!;
+    a.fees = r.fees!;
+    a.nextOrder = Math.max(1, Math.floor(r.nextOrder!));
+    a.nextFill = Math.max(1, Math.floor(r.nextFill!));
+
+    for (const [sym, p] of Object.entries(r.positions)) {
+      if (!p || !isNum(p.qty) || !isNum(p.avg) || p.qty <= 0) return null;
+      if (validSyms.has(sym)) a.positions[sym] = { qty: p.qty, avg: p.avg };
+      else dropped++;
+    }
+    for (const o of r.orders as Order[]) {
+      if (!o || !isNum(o.id) || !isNum(o.qty) || o.qty <= 0 || !isSide(o.side) || o.type !== "LMT") return null;
+      if (!isNum(o.limit) || o.limit <= 0 || typeof o.sym !== "string" || !isNum(o.ts)) return null;
+      if (validSyms.has(o.sym)) a.orders.push({ id: o.id, sym: o.sym, side: o.side, type: "LMT", qty: o.qty, limit: o.limit, ts: o.ts });
+      else dropped++;
+    }
+    for (const f of (r.fills as Fill[]).slice(0, 200)) {
+      const ok =
+        f && [f.id, f.orderId, f.qty, f.price, f.pnl, f.levels, f.slip, f.fee, f.ts].every(isNum) &&
+        isSide(f.side) && typeof f.sym === "string" && (f.role === "maker" || f.role === "taker");
+      if (!ok) return null;
+      a.fills.push({ ...f });
+    }
+    return { account: a, dropped };
+  }
 
   equity(m: Quotes): number {
     let e = this.cash;

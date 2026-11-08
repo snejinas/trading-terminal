@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
+import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
   Account,
   Market,
@@ -267,11 +268,42 @@ export default function TradingTerminal() {
     setLog((l) => [{ t: Date.now(), msg, err }, ...l].slice(0, 60));
   }, []);
 
+  // Persist the paper account whenever it changes (cheap signature check, so safe to call often).
+  const sourceRef = useRef<SourceKey | null>(null);
+  const lastSaved = useRef("");
+  const persist = useCallback(() => {
+    const a = account.current;
+    const src = sourceRef.current;
+    if (!a || !src) return;
+    const sig = a.signature();
+    if (sig === lastSaved.current) return;
+    if (saveAccount(src, a)) lastSaved.current = sig;
+  }, []);
+
+  // Flush on tab close, and pick up changes made in another tab.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      const src = sourceRef.current;
+      const mk = market.current;
+      if (!src || !mk || e.key !== storageKey(src) || !e.newValue) return;
+      const res = parseAccount(e.newValue, new Set(mk.instruments.map((i) => i.sym)));
+      if (!res) return;
+      account.current = res.account;
+      lastSaved.current = res.account.signature();
+      setTick((t) => t + 1);
+    };
+    window.addEventListener("pagehide", persist);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("pagehide", persist);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [persist]);
+
   // init on client only: try Binance public data, fall back to simulation
   useEffect(() => {
     let cancelled = false;
     let feed: Feed | null = null;
-    account.current = new Account();
     (async () => {
       try {
         const b = new BinanceMarket();
@@ -286,6 +318,18 @@ export default function TradingTerminal() {
         feed = new Market();
         setSource("sim");
         say(`Could not reach Binance (${(e as Error).message}). Using simulated prices instead.`, true);
+      }
+      const src: SourceKey = feed instanceof BinanceMarket ? "binance" : "sim";
+      const restored = loadAccount(src, new Set(feed.instruments.map((i) => i.sym)));
+      account.current = restored?.account ?? new Account();
+      sourceRef.current = src;
+      lastSaved.current = restored ? restored.account.signature() : "";
+      if (restored) {
+        const r = restored.account;
+        say(
+          `Restored your paper account: ${r.fills.length} fills, ${Object.keys(r.positions).length} positions, ${r.orders.length} working orders. Type \`reset\` to start over.`
+        );
+        if (restored.dropped) say(`${restored.dropped} saved position/order(s) were for symbols not in this feed and were dropped.`, true);
       }
       market.current = feed;
       setSym(feed.instruments[0].sym);
@@ -307,10 +351,11 @@ export default function TradingTerminal() {
       const lastId = a.fills[0]?.id ?? 0;
       a.match(m);
       for (const f of a.fills.filter((x) => x.id > lastId).reverse()) say(`Filled #${f.orderId}: ${describeFill(f)}`);
+      persist();
       setTick((t) => t + 1);
     }, TICK_MS);
     return () => clearInterval(id);
-  }, [paused, say]);
+  }, [paused, say, persist]);
 
   const m = market.current;
   const a = account.current;
@@ -326,9 +371,10 @@ export default function TradingTerminal() {
       for (const f of ac.fills.filter((x) => x.id > lastId).reverse()) say(`Filled: ${describeFill(f)}`);
       const rest = ac.orders.find((o) => !knownOrders.has(o.id));
       if (rest) say(`Working #${rest.id}: ${sd} ${fmtQty(rest.qty)} ${s} LMT @ ${fmt(lim!, dpFor(s))}`);
+      persist();
       setTick((t) => t + 1);
     },
-    [say]
+    [say, persist]
   );
 
   const runCommand = (raw: string) => {
@@ -364,6 +410,7 @@ export default function TradingTerminal() {
       const target = args[0] === "all" ? "all" : parseInt(args[0], 10);
       if (target !== "all" && !Number.isFinite(target)) return say("Usage: cancel ORDER_ID | cancel all", true);
       const n = ac.cancel(target);
+      persist();
       setTick((t) => t + 1);
       return say(n ? `Cancelled ${n} order(s)` : "No matching order", !n);
     }
@@ -376,6 +423,7 @@ export default function TradingTerminal() {
     if (cmdName === "resume") return setPaused(false);
     if (cmdName === "reset") {
       account.current = new Account();
+      persist();
       setTick((t) => t + 1);
       return say("Account reset to $" + fmt(START_CASH, 0));
     }
