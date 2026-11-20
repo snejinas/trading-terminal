@@ -218,6 +218,10 @@ export interface Order {
 /** Fee rates as a fraction of notional (Binance spot standard tier: 0.1% / 0.1%). */
 export const FEE_RATE = { maker: 0.001, taker: 0.001 } as const;
 export type Role = keyof typeof FEE_RATE;
+export interface FeeRates {
+  maker: number;
+  taker: number;
+}
 
 export interface Fill {
   id: number;
@@ -302,6 +306,8 @@ export class Account {
   fills: Fill[] = [];
   realized = 0; // net of fees
   fees = 0; // total fees paid
+  /** Rates charged on new fills. Past fills keep the fee they were charged. Not part of the saved snapshot. */
+  rates: FeeRates = { ...FEE_RATE };
   private nextOrder = 1;
   private nextFill = 1;
 
@@ -389,9 +395,9 @@ export class Account {
     } else {
       const reserved = this.orders
         .filter((x) => x.side === "BUY")
-        .reduce((s, x) => s + x.qty * (x.limit ?? m.ask(x.sym)) * (1 + FEE_RATE.taker), 0);
+        .reduce((s, x) => s + x.qty * (x.limit ?? m.ask(x.sym)) * (1 + this.rates.taker), 0);
       const notional = o.type === "LMT" ? o.qty * o.limit! : sweep(m, o.sym, "BUY", o.qty).cost;
-      const need = notional * (1 + FEE_RATE.taker);
+      const need = notional * (1 + this.rates.taker);
       if (need > this.cash - reserved + 1e-6) return "Insufficient buying power";
     }
     if (o.type === "MKT") {
@@ -430,7 +436,7 @@ export class Account {
   private execute(m: Quotes, o: Order, role: Role): number {
     const sw = sweep(m, o.sym, o.side, o.qty, o.type === "LMT" ? o.limit : undefined);
     if (sw.qty <= 0) return 0;
-    this.fill(o, sw.avg, sw.qty, sw.levels, Math.abs(sw.avg - sw.best), sw.cost * FEE_RATE[role], role);
+    this.fill(o, sw.avg, sw.qty, sw.levels, Math.abs(sw.avg - sw.best), sw.cost * this.rates[role], role);
     // Only a taker fill eats visible liquidity; a maker fill means someone else hit our resting order.
     if (role === "taker") m.consume?.(o.sym, o.side, sw.taken);
     return sw.qty;

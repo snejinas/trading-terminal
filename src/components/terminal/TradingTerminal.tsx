@@ -2,13 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
+import {
+  DEFAULT_FEE_CONFIG,
+  FEE_TIERS,
+  MAX_CUSTOM_PCT,
+  feeLabel,
+  fmtRate,
+  loadFeeConfig,
+  ratesFor,
+  saveFeeConfig,
+  type FeeConfig,
+} from "@/lib/trading/fees";
 import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
   Account,
   Market,
   START_CASH,
   sweep,
-  FEE_RATE,
   type Fill,
   type Feed,
   dpFor,
@@ -280,6 +290,42 @@ export default function TradingTerminal() {
     if (saveAccount(src, a)) lastSaved.current = sig;
   }, []);
 
+  // Fee schedule: a user setting, stored apart from the account. The ref lets account (re)creation
+  // paths pick up the current rates without being re-created on every change.
+  const [feeCfg, setFeeCfg] = useState<FeeConfig>(DEFAULT_FEE_CONFIG);
+  const feeCfgRef = useRef<FeeConfig>(DEFAULT_FEE_CONFIG);
+  const [feeOpen, setFeeOpen] = useState(false);
+  const feeBox = useRef<HTMLDivElement>(null);
+  const withRates = useCallback((acc: Account): Account => {
+    acc.rates = ratesFor(feeCfgRef.current);
+    return acc;
+  }, []);
+  const updateFees = useCallback(
+    (next: FeeConfig) => {
+      feeCfgRef.current = next;
+      setFeeCfg(next);
+      saveFeeConfig(next);
+      if (account.current) account.current.rates = ratesFor(next);
+      const r = ratesFor(next);
+      say(`Fee schedule: ${feeLabel(next)}, maker ${fmtRate(r.maker)} / taker ${fmtRate(r.taker)} (applies to new fills).`);
+      setTick((t) => t + 1);
+    },
+    [say]
+  );
+  useEffect(() => {
+    if (!feeOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (feeBox.current && !feeBox.current.contains(e.target as Node)) setFeeOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFeeOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [feeOpen]);
+
   // Flush on tab close, and pick up changes made in another tab.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
@@ -288,7 +334,7 @@ export default function TradingTerminal() {
       if (!src || !mk || e.key !== storageKey(src) || !e.newValue) return;
       const res = parseAccount(e.newValue, new Set(mk.instruments.map((i) => i.sym)));
       if (!res) return;
-      account.current = res.account;
+      account.current = withRates(res.account);
       lastSaved.current = res.account.signature();
       setTick((t) => t + 1);
     };
@@ -298,7 +344,7 @@ export default function TradingTerminal() {
       window.removeEventListener("pagehide", persist);
       window.removeEventListener("storage", onStorage);
     };
-  }, [persist]);
+  }, [persist, withRates]);
 
   // init on client only: try Binance public data, fall back to simulation
   useEffect(() => {
@@ -321,7 +367,10 @@ export default function TradingTerminal() {
       }
       const src: SourceKey = feed instanceof BinanceMarket ? "binance" : "sim";
       const restored = loadAccount(src, new Set(feed.instruments.map((i) => i.sym)));
-      account.current = restored?.account ?? new Account();
+      const cfg = loadFeeConfig();
+      feeCfgRef.current = cfg;
+      setFeeCfg(cfg);
+      account.current = withRates(restored?.account ?? new Account());
       sourceRef.current = src;
       lastSaved.current = restored ? restored.account.signature() : "";
       if (restored) {
@@ -339,7 +388,7 @@ export default function TradingTerminal() {
       cancelled = true;
       feed?.dispose();
     };
-  }, [say]);
+  }, [say, withRates]);
 
   useEffect(() => {
     if (paused) return;
@@ -422,7 +471,7 @@ export default function TradingTerminal() {
     if (cmdName === "pause") return setPaused(true);
     if (cmdName === "resume") return setPaused(false);
     if (cmdName === "reset") {
-      account.current = new Account();
+      account.current = withRates(new Account());
       persist();
       setTick((t) => t + 1);
       return say("Account reset to $" + fmt(START_CASH, 0));
@@ -461,7 +510,7 @@ export default function TradingTerminal() {
       : null;
   const estNotional = est ? est.cost + (type === "LMT" ? (qNum - est.qty) * limNum : 0) : 0;
   // marketable part pays taker; any remainder would rest and pay maker
-  const estFee = est ? est.cost * FEE_RATE.taker + (estNotional - est.cost) * FEE_RATE.maker : 0;
+  const estFee = est ? est.cost * a.rates.taker + (estNotional - est.cost) * a.rates.maker : 0;
   const estShort = est ? qNum - est.qty > 1e-9 : false;
 
   return (
@@ -480,12 +529,87 @@ export default function TradingTerminal() {
         <Stat label="Realized (net)" value={sign(a.realized)} cls={pnlColor(a.realized)} />
         <Stat label="Fees paid" value={`$${fmt(a.fees)}`} />
         <Stat label="Total P&L" value={`${sign(total)} (${sign((total / START_CASH) * 100)}%)`} cls={pnlColor(total)} />
-        <button
-          onClick={() => setPaused((p) => !p)}
-          className="ml-auto rounded border border-white/15 px-2 py-1 text-xs hover:bg-white/5"
-        >
-          {paused ? "▶ Resume feed" : "⏸ Pause feed"}
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <div ref={feeBox} className="relative">
+            <button
+              onClick={() => setFeeOpen((o) => !o)}
+              aria-expanded={feeOpen}
+              aria-haspopup="dialog"
+              className="rounded border border-white/15 px-2 py-1 text-xs hover:bg-white/5"
+            >
+              Fees: {feeLabel(feeCfg)} · {fmtRate(a.rates.maker)} / {fmtRate(a.rates.taker)}
+            </button>
+            {feeOpen && (
+              <div
+                role="dialog"
+                aria-label="Fee tier"
+                className="absolute right-0 top-full z-30 mt-1 w-72 space-y-3 rounded border border-white/15 bg-[#10141c] p-3 text-xs shadow-xl"
+              >
+                <label className="block text-slate-400">
+                  Fee tier
+                  <select
+                    value={feeCfg.tier}
+                    onChange={(e) => updateFees({ ...feeCfg, tier: e.target.value })}
+                    className="mt-1 w-full rounded border border-white/15 bg-[#0b0e14] px-2 py-1.5 text-slate-100 outline-none focus:border-white/40"
+                  >
+                    {FEE_TIERS.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label} · maker {fmtRate(t.maker / 100)} / taker {fmtRate(t.taker / 100)}
+                      </option>
+                    ))}
+                    <option value="custom">Custom…</option>
+                  </select>
+                </label>
+                {feeCfg.tier === "custom" ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    {(["maker", "taker"] as const).map((k) => (
+                      <label key={k} className="block text-slate-400">
+                        {k === "maker" ? "Maker %" : "Taker %"}
+                        <input
+                          type="number"
+                          min={0}
+                          max={MAX_CUSTOM_PCT}
+                          step={0.001}
+                          value={feeCfg.custom[k]}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            updateFees({ ...feeCfg, custom: { ...feeCfg.custom, [k]: Number.isFinite(v) ? v : 0 } });
+                          }}
+                          className="mt-1 w-full rounded border border-white/15 bg-[#0b0e14] px-2 py-1.5 text-slate-100 outline-none focus:border-white/40"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <label className="flex items-center gap-2 text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={feeCfg.bnb}
+                      onChange={(e) => updateFees({ ...feeCfg, bnb: e.target.checked })}
+                    />
+                    Pay fees in BNB (25% discount)
+                  </label>
+                )}
+                <div className="flex justify-between text-slate-400">
+                  <span>Effective maker / taker</span>
+                  <span className="text-slate-100">
+                    {fmtRate(a.rates.maker)} / {fmtRate(a.rates.taker)}
+                  </span>
+                </div>
+                <p className="text-[10px] leading-snug text-slate-500">
+                  Applies to new fills only; past fills keep the fee they were charged. Tier rates are approximate and
+                  Binance changes them, so check the current schedule or use Custom.
+                </p>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => setPaused((p) => !p)}
+            className="rounded border border-white/15 px-2 py-1 text-xs hover:bg-white/5"
+          >
+            {paused ? "▶ Resume feed" : "⏸ Pause feed"}
+          </button>
+        </div>
       </header>
 
       <div className="grid flex-1 grid-cols-1 gap-px bg-white/10 lg:min-h-0 lg:grid-cols-[220px_minmax(0,1fr)_280px]">
@@ -706,7 +830,7 @@ export default function TradingTerminal() {
               <span className="text-slate-200">${fmt(side === "BUY" ? estNotional + estFee : estNotional - estFee)}</span>
             </div>
             <div className="flex justify-between text-xs text-slate-400">
-              <span>Fee ({(FEE_RATE.taker * 100).toFixed(2)}%)</span>
+              <span>Fee ({fmtRate(a.rates.taker)})</span>
               <span className="text-slate-200">${fmt(estFee, 4)}</span>
             </div>
             {est && est.qty > 0 && (
