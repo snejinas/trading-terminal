@@ -50,8 +50,9 @@ export function aggregateByTime(candles: Candle[], ms: number): Candle[] {
       last.h = Math.max(last.h, c.h);
       last.l = Math.min(last.l, c.l);
       last.c = c.c;
+      if (c.v !== undefined) last.v = (last.v ?? 0) + c.v;
     } else {
-      out.push({ t: bt, o: c.o, h: c.h, l: c.l, c: c.c });
+      out.push(c.v === undefined ? { t: bt, o: c.o, h: c.h, l: c.l, c: c.c } : { t: bt, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v });
     }
   }
   return out;
@@ -61,16 +62,23 @@ export function aggregateByTime(candles: Candle[], ms: number): Candle[] {
  * Fold a live 1m candle update into a higher-timeframe candle list, in place. The 1m stream sends
  * the in-progress candle repeatedly, so high/low only ever widen and the close tracks the latest.
  * Updates older than the newest bucket are ignored. The list is trimmed to `max` candles.
+ *
+ * Volume: the stream's volume is cumulative for the minute, so the caller passes `dv`, the volume
+ * traded since the previous update of that same minute (or the whole amount for a new minute),
+ * which is added to the bucket. (Folding the raw cumulative value would double count.)
  */
-export function foldCandle(list: Candle[], ms: number, k: Candle, max = MAX_CANDLES): void {
+export function foldCandle(list: Candle[], ms: number, k: Candle, max = MAX_CANDLES, dv = 0): void {
   const bt = bucketStart(k.t, ms);
   const last = list[list.length - 1];
   if (last && last.t === bt) {
     last.h = Math.max(last.h, k.h);
     last.l = Math.min(last.l, k.l);
     last.c = k.c;
+    if (dv > 0 || last.v !== undefined) last.v = (last.v ?? 0) + Math.max(0, dv);
   } else if (!last || bt > last.t) {
-    list.push({ t: bt, o: k.o, h: k.h, l: k.l, c: k.c });
+    const nc: Candle = { t: bt, o: k.o, h: k.h, l: k.l, c: k.c };
+    if (dv > 0 || k.v !== undefined) nc.v = Math.max(0, dv);
+    list.push(nc);
     if (list.length > max) list.shift();
   }
 }

@@ -30,6 +30,8 @@ export interface Candle {
   h: number;
   l: number;
   c: number;
+  /** Base-asset volume traded in the candle. Optional: not every source provides it. */
+  v?: number;
 }
 
 /** Minimal quote source the Account needs. */
@@ -135,6 +137,12 @@ export function registerInstruments(list: Instrument[]): void {
 }
 
 export const TICKS_PER_CANDLE = 6;
+/** Simulated volume for `ticks` ticks of a move `z` standard deviations big (about $2M notional per candle). */
+function simVolume(ins: Instrument, z: number, ticks: number): number {
+  const perTick = 2_000_000 / ins.start / TICKS_PER_CANDLE;
+  return perTick * ticks * (0.5 + z) * (0.6 + 0.8 * Math.random());
+}
+
 const HISTORY = 3600; // base candles of simulated history (3s each = 3h), enough for 5m charts
 
 function gauss(): number {
@@ -168,7 +176,9 @@ export class Market implements Feed {
           h = Math.max(h, p);
           l = Math.min(l, p);
         }
-        list.push({ t: now - i * TICKS_PER_CANDLE * 500, o, h, l, c: p });
+        // volume grows with how far price moved, like real markets
+        const move = Math.abs(Math.log(p / o)) / (ins.vol * Math.sqrt(TICKS_PER_CANDLE));
+        list.push({ t: now - i * TICKS_PER_CANDLE * 500, o, h, l, c: p, v: simVolume(ins, move * Math.sqrt(TICKS_PER_CANDLE), TICKS_PER_CANDLE) });
       }
       this.candles[ins.sym] = list;
       this.price[ins.sym] = p;
@@ -185,10 +195,12 @@ export class Market implements Feed {
 
   tick(): void {
     for (const ins of UNIVERSE) {
-      const p = this.step(ins, this.price[ins.sym]);
+      const prevPx = this.price[ins.sym];
+      const p = this.step(ins, prevPx);
       this.price[ins.sym] = p;
       const list = this.candles[ins.sym];
       const last = list[list.length - 1];
+      last.v = (last.v ?? 0) + simVolume(ins, Math.abs(Math.log(p / prevPx)) / ins.vol, 1);
       last.c = p;
       last.h = Math.max(last.h, p);
       last.l = Math.min(last.l, p);

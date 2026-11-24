@@ -99,10 +99,12 @@ export class BinanceMarket implements Feed {
       } else if (d.e === "kline") {
         const s: string = d.s;
         const k = d.k;
-        const c = toCandle([k.t, k.o, k.h, k.l, k.c]);
+        const c = toCandle([k.t, k.o, k.h, k.l, k.c, k.v]);
         const list = this.candles[s];
         if (!list) return;
         const last = list[list.length - 1];
+        // volume traded since the previous update (the stream's value is cumulative for the minute)
+        const dv = c.v === undefined ? 0 : last && last.t === c.t ? Math.max(0, c.v - (last.v ?? 0)) : c.v;
         if (last && last.t === c.t) list[list.length - 1] = c;
         else {
           list.push(c);
@@ -113,7 +115,7 @@ export class BinanceMarket implements Feed {
         for (const key of Object.keys(this.tf)) {
           if (!key.startsWith(s + "|")) continue;
           const tfm = this.timeframes.find((t) => t.id === key.slice(s.length + 1));
-          if (tfm) foldCandle(this.tf[key], tfm.ms, c);
+          if (tfm) foldCandle(this.tf[key], tfm.ms, c, MAX_CANDLES, dv);
         }
       } else if (d.b !== undefined && d.a !== undefined && d.s) {
         // bookTicker: best bid / ask
@@ -264,5 +266,11 @@ async function fetchJson(url: string): Promise<unknown> {
 }
 
 function toCandle(k: (string | number)[]): Candle {
-  return { t: Number(k[0]), o: +k[1], h: +k[2], l: +k[3], c: +k[4] };
+  const c: Candle = { t: Number(k[0]), o: +k[1], h: +k[2], l: +k[3], c: +k[4] };
+  // kline row index 5 / stream field `v` = base-asset volume
+  if (k[5] !== undefined) {
+    const v = +k[5];
+    if (Number.isFinite(v)) c.v = v;
+  }
+  return c;
 }

@@ -55,6 +55,36 @@ export function zoomAt(
   return { count: next, offset: clampOffset(offset, next, len) };
 }
 
+/** Compact volume label: 12.3K, 4.56M, 87, 3.21, 0.045. */
+export function formatVolume(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return "0";
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+  if (v >= 100) return v.toFixed(0);
+  if (v >= 1) return v.toFixed(2);
+  return v.toFixed(3);
+}
+
+const VOLUME_KEY = "lifeinception.terminal.chart.volume.v1";
+
+/** Whether the volume pane is shown (default on). */
+export function loadVolumePref(): boolean {
+  try {
+    return localStorage.getItem(VOLUME_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function saveVolumePref(on: boolean): void {
+  try {
+    localStorage.setItem(VOLUME_KEY, on ? "on" : "off");
+  } catch {
+    /* storage blocked or full: the preference just won't survive a refresh */
+  }
+}
+
 /** Candles appended at the right since the newest candle we last saw had time `lastT`. */
 export function appendedSince(all: Candle[], lastT: number): number {
   let n = 0;
