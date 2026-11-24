@@ -178,7 +178,7 @@ export class Market implements Feed {
         }
         // volume grows with how far price moved, like real markets
         const move = Math.abs(Math.log(p / o)) / (ins.vol * Math.sqrt(TICKS_PER_CANDLE));
-        list.push({ t: now - i * TICKS_PER_CANDLE * 500, o, h, l, c: p, v: simVolume(ins, move * Math.sqrt(TICKS_PER_CANDLE), TICKS_PER_CANDLE) });
+        list.push({ t: now - i * TICKS_PER_CANDLE * 500, o, h, l, c: p, v: simVolume(ins, move, TICKS_PER_CANDLE) });
       }
       this.candles[ins.sym] = list;
       this.price[ins.sym] = p;
@@ -207,7 +207,7 @@ export class Market implements Feed {
       this.ticks[ins.sym]++;
       if (this.ticks[ins.sym] >= TICKS_PER_CANDLE) {
         this.ticks[ins.sym] = 0;
-        list.push({ t: Date.now(), o: p, h: p, l: p, c: p });
+        list.push({ t: Date.now(), o: p, h: p, l: p, c: p, v: 0 });
         if (list.length > HISTORY * 2) list.shift();
       }
     }

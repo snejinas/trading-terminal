@@ -55,15 +55,25 @@ export function zoomAt(
   return { count: next, offset: clampOffset(offset, next, len) };
 }
 
-/** Compact volume label: 12.3K, 4.56M, 87, 3.21, 0.045. */
+/**
+ * Compact volume label: 0.045, 3.21, 87.40, 743, 12.3K, 4.56M, 2.50B. Tiny non-zero values read
+ * "<0.001", and rounding never prints "1000.0K": it rolls over into the next unit ("1.00M").
+ */
 export function formatVolume(v: number): string {
-  if (!Number.isFinite(v) || v <= 0) return "0";
-  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
-  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
-  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
-  if (v >= 100) return v.toFixed(0);
-  if (v >= 1) return v.toFixed(2);
-  return v.toFixed(3);
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return "0";
+  if (v < 0.001) return "<0.001";
+  const tiers: [number, string, number][] = [
+    [1e9, "B", 2],
+    [1e6, "M", 2],
+    [1e3, "K", 1],
+  ];
+  for (const [div, suffix, dp] of tiers) {
+    if (v < div) continue;
+    const s = (v / div).toFixed(dp);
+    return parseFloat(s) >= 1000 && suffix !== "B" ? formatVolume(div * 1000) : `${s}${suffix}`;
+  }
+  const s = v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(3);
+  return parseFloat(s) >= 1000 ? "1.0K" : s;
 }
 
 const VOLUME_KEY = "lifeinception.terminal.chart.volume.v1";
