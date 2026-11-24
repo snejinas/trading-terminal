@@ -3,6 +3,8 @@
  * Prices are SIMULATED (random walk). No real market data, no real money.
  */
 
+import { SIM_TIMEFRAMES, aggregateByTime, type Timeframe } from "./timeframes";
+
 export interface Instrument {
   sym: string;
   name: string;
@@ -45,7 +47,15 @@ export interface Quotes {
 export interface Feed extends Quotes {
   instruments: Instrument[];
   open: Record<string, number>;
+  /** Base-resolution candles (the finest timeframe this feed has). */
   candles: Record<string, Candle[]>;
+  /** Chart timeframes this feed can serve, finest first, and the one to show initially. */
+  timeframes: Timeframe[];
+  defaultTimeframe: string;
+  /** Candles for a timeframe id, oldest first; empty until loadTimeframe() has run for it. */
+  candlesFor(sym: string, timeframeId: string): Candle[];
+  /** Make sure candlesFor(sym, id) has data. Resolves immediately if already loaded; rejects on failure. */
+  loadTimeframe(sym: string, timeframeId: string): Promise<void>;
   spread(sym: string): number;
   changePct(sym: string): number;
   /** True while this symbol's visible book is still depleted by our own fills. */
@@ -120,7 +130,7 @@ export function registerInstruments(list: Instrument[]): void {
 }
 
 export const TICKS_PER_CANDLE = 6;
-const HISTORY = 160;
+const HISTORY = 3600; // base candles of simulated history (3s each = 3h), enough for 5m charts
 
 function gauss(): number {
   // Box–Muller
@@ -131,6 +141,8 @@ function gauss(): number {
 
 export class Market implements Feed {
   instruments = UNIVERSE;
+  timeframes = SIM_TIMEFRAMES;
+  defaultTimeframe = "3s";
   price: Record<string, number> = {};
   open: Record<string, number> = {};
   candles: Record<string, Candle[]> = {};
@@ -185,6 +197,14 @@ export class Market implements Feed {
   }
 
   dispose(): void {}
+
+  candlesFor(sym: string, timeframeId: string): Candle[] {
+    const base = this.candles[sym] ?? [];
+    const tf = this.timeframes.find((t) => t.id === timeframeId);
+    if (!tf) return [];
+    return tf.ms <= TICKS_PER_CANDLE * 500 ? base : aggregateByTime(base, tf.ms);
+  }
+  async loadTimeframe(): Promise<void> {} // everything is derived from the base candles already in memory
 
   spread(sym: string): number {
     return this.price[sym] * 0.0002;

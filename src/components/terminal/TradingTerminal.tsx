@@ -22,6 +22,7 @@ import {
   type BackupSummary,
 } from "@/lib/trading/backup";
 import { SLIPPAGE_SEVERE_BPS, estimateSlippage, slippageLine } from "@/lib/trading/slippage";
+import { formatAxisTime, formatFullTime, loadTimeframeId, saveTimeframeId } from "@/lib/trading/timeframes";
 import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
   Account,
@@ -59,7 +60,7 @@ function describeFill(f: Fill): string {
 
 // ─── Candlestick chart ──────────────────────────────────────────────────────
 
-function Chart({ market, sym }: { market: Feed; sym: string }) {
+function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: string; loading: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const mouse = useRef<{ x: number; y: number } | null>(null);
   const [, bump] = useState(0);
@@ -83,9 +84,22 @@ function Chart({ market, sym }: { market: Feed; sym: string }) {
     const pad = 12;
     const plotW = w - axisW - pad;
     const plotH = h - 24;
-    const all = market.candles[sym];
+    const tfm = market.timeframes.find((x) => x.id === tf);
+    const tfMs = tfm?.ms ?? 60_000;
+    const all = market.candlesFor(sym, tf);
     const n = Math.max(20, Math.min(90, Math.floor(plotW / 8)));
     const data = all.slice(-n);
+    if (data.length === 0) {
+      ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillStyle = "#7d8799";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(loading ? `Loading ${tfm?.label ?? tf} candles…` : "No candle data", plotW / 2, plotH / 2);
+      ctx.textAlign = "left";
+      return;
+    }
+    // with fewer candles than slots (short history), keep the newest candle at the right edge
+    const slot = n - data.length;
 
     let lo = Infinity;
     let hi = -Infinity;
@@ -116,9 +130,27 @@ function Chart({ market, sym }: { market: Feed; sym: string }) {
       ctx.fillText(fmt(p, dp), plotW + 8, yy);
     }
 
+    // time axis: labels anchored to absolute candle index so they stay put as new candles arrive
+    ctx.fillStyle = "#7d8799";
+    ctx.textAlign = "center";
+    const every = Math.max(1, Math.ceil(110 / step));
+    const offset = all.length - data.length;
+    data.forEach((c, i) => {
+      if ((offset + i) % every !== 0) return;
+      const x = (slot + i) * step + step / 2;
+      if (x < 30 || x > plotW - 30) return;
+      ctx.strokeStyle = "rgba(255,255,255,0.06)";
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, plotH);
+      ctx.stroke();
+      ctx.fillText(formatAxisTime(c.t, tfMs), x, plotH + 12);
+    });
+    ctx.textAlign = "left";
+
     // candles
     data.forEach((c, i) => {
-      const x = i * step + step / 2;
+      const x = (slot + i) * step + step / 2;
       const up = c.c >= c.o;
       ctx.strokeStyle = ctx.fillStyle = up ? UP : DOWN;
       ctx.beginPath();
@@ -163,18 +195,31 @@ function Chart({ market, sym }: { market: Feed; sym: string }) {
       ctx.fillRect(plotW + 2, m.y - 9, axisW - 2, 18);
       ctx.fillStyle = "#e6eaf2";
       ctx.fillText(fmt(price, dp), plotW + 8, m.y);
-      const idx = Math.min(data.length - 1, Math.max(0, Math.floor(m.x / step)));
+      const hover = Math.floor(m.x / step) - slot; // negative = cursor is over the empty area left of the first candle
+      const idx = Math.min(data.length - 1, Math.max(0, hover));
       const c = data[idx];
-      ctx.fillStyle = "#aab3c5";
-      ctx.textBaseline = "alphabetic";
-      ctx.fillText(
-        `O ${fmt(c.o, dp)}  H ${fmt(c.h, dp)}  L ${fmt(c.l, dp)}  C ${fmt(c.c, dp)}`,
-        8,
-        h - 6
-      );
-      ctx.textBaseline = "middle";
+      if (hover >= 0) {
+        // time tag on the x axis
+        const tag = formatFullTime(c.t, tfMs);
+        const tw = ctx.measureText(tag).width + 12;
+        const tx = Math.min(Math.max((slot + idx) * step + step / 2 - tw / 2, 0), plotW - tw);
+        ctx.fillStyle = "#2a3140";
+        ctx.fillRect(tx, plotH + 3, tw, 18);
+        ctx.fillStyle = "#e6eaf2";
+        ctx.textAlign = "center";
+        ctx.fillText(tag, tx + tw / 2, plotH + 12);
+        ctx.textAlign = "left";
+        // OHLC readout at the top-left of the plot (the bottom strip is now the time axis)
+        const chg = c.o ? (c.c / c.o - 1) * 100 : 0;
+        const ro = `O ${fmt(c.o, dp)}  H ${fmt(c.h, dp)}  L ${fmt(c.l, dp)}  C ${fmt(c.c, dp)}  ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`;
+        const rw = ctx.measureText(ro).width + 12;
+        ctx.fillStyle = "rgba(11,14,20,0.85)";
+        ctx.fillRect(4, 2, rw, 18);
+        ctx.fillStyle = c.c >= c.o ? UP : DOWN;
+        ctx.fillText(ro, 10, 11);
+      }
     }
-  }, [market, sym]);
+  }, [market, sym, tf, loading]);
 
   useEffect(() => {
     draw();
@@ -280,6 +325,8 @@ export default function TradingTerminal() {
   const account = useRef<Account | null>(null);
   const [tick, setTick] = useState(0);
   const [sym, setSym] = useState("");
+  const [tf, setTf] = useState(""); // chart timeframe id
+  const [tfLoading, setTfLoading] = useState(false);
   const [side, setSide] = useState<Side>("BUY");
   const [type, setType] = useState<OrderType>("MKT");
   const [qty, setQty] = useState("10");
@@ -435,6 +482,33 @@ export default function TradingTerminal() {
     return () => document.removeEventListener("keydown", onKey);
   }, [importDlg]);
 
+  // Timeframe: remember the choice per feed, and fetch history the first time a symbol+timeframe is shown.
+  const chooseTf = useCallback((id: string) => {
+    setTf(id);
+    if (sourceRef.current) saveTimeframeId(sourceRef.current, id);
+  }, []);
+  useEffect(() => {
+    const mk = market.current;
+    if (!mk || !sym || !tf) return;
+    if (mk.candlesFor(sym, tf).length > 0) {
+      setTfLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setTfLoading(true);
+    mk.loadTimeframe(sym, tf)
+      .then(() => !cancelled && setTick((t) => t + 1))
+      .catch((e) => {
+        if (cancelled) return;
+        say(`Couldn't load ${tf} candles for ${sym}: ${(e as Error).message}. Showing ${mk.defaultTimeframe} instead.`, true);
+        setTf(mk.defaultTimeframe);
+      })
+      .finally(() => !cancelled && setTfLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [sym, tf, say]);
+
   // Flush on tab close, and pick up changes made in another tab.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
@@ -490,6 +564,7 @@ export default function TradingTerminal() {
         if (restored.dropped) say(`${restored.dropped} saved position/order(s) were for symbols not in this feed and were dropped.`, true);
       }
       market.current = feed;
+      setTf(loadTimeframeId(src, feed.timeframes) ?? feed.defaultTimeframe);
       setSym(feed.instruments[0].sym);
       setTick(1);
     })();
@@ -582,10 +657,23 @@ export default function TradingTerminal() {
       setTick((t) => t + 1);
       return say(n ? `Cancelled ${n} order(s)` : "No matching order", !n);
     }
+    const findTf = (w?: string) =>
+      mk.timeframes.find((t) => t.id.toLowerCase() === (w ?? "").toLowerCase() || t.label.toLowerCase() === (w ?? "").toLowerCase());
+    const tfList = mk.timeframes.map((t) => t.label).join(" | ");
     if (cmdName === "chart" || cmdName === "go") {
       const s = known(args[0]);
-      if (!s) return say("Usage: chart SYMBOL", true);
+      if (!s) return say("Usage: chart SYMBOL [TIMEFRAME]", true);
+      if (args[1]) {
+        const f = findTf(args[1]);
+        if (!f) return say(`Unknown timeframe "${args[1]}". Use ${tfList}`, true);
+        chooseTf(f.id);
+      }
       return setSym(s);
+    }
+    if (cmdName === "tf" || cmdName === "timeframe") {
+      const f = findTf(args[0]);
+      if (!f) return say(`Usage: tf ${tfList}`, true);
+      return chooseTf(f.id);
     }
     if (cmdName === "pause") return setPaused(true);
     if (cmdName === "resume") return setPaused(false);
@@ -603,7 +691,8 @@ export default function TradingTerminal() {
         "buy|sell SYM QTY [LIMIT] [!]   e.g. buy BTCUSDT 0.01   |  sell ETHUSDT 1 2600   (! confirms high slippage)",
         "flat SYM                   close the whole position at market",
         "cancel ID | cancel all     cancel working orders",
-        "chart SYM                  switch chart/ticket symbol",
+        "chart SYM [TF]             switch chart/ticket symbol (and timeframe)",
+        "tf TIMEFRAME               chart timeframe, e.g. tf 1h",
         "pause | resume | reset | clear",
         "export | import            back up / restore the paper account as a JSON file",
       ].forEach((l) => say(l));
@@ -930,16 +1019,31 @@ export default function TradingTerminal() {
 
         {/* Center: chart + blotter + command line */}
         <main className="flex min-w-0 flex-col bg-[#0b0e14] lg:min-h-0">
-          <div className="flex items-baseline gap-4 border-b border-white/10 px-4 py-2">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-white/10 px-4 py-2">
             <span className="text-lg font-bold">{sym}</span>
             <span className="text-lg">{fmt(m.price[sym], dp)}</span>
             <span className={pnlColor(m.changePct(sym))}>{sign(m.changePct(sym))}%</span>
+            <div role="group" aria-label="Chart timeframe" className="flex items-center gap-0.5">
+              {m.timeframes.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => chooseTf(t.id)}
+                  aria-pressed={tf === t.id}
+                  className={`rounded px-2 py-0.5 text-xs ${
+                    tf === t.id ? "bg-white/15 text-white" : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+              {tfLoading && <span className="ml-2 text-[10px] text-slate-500">loading…</span>}
+            </div>
             <span className="ml-auto text-xs text-slate-500">
               bid {fmt(m.bid(sym), dp)} · ask {fmt(m.ask(sym), dp)}
             </span>
           </div>
           <div className="h-[320px] lg:h-auto lg:min-h-[200px] lg:flex-[3]">
-            <Chart market={m} sym={sym} />
+            <Chart market={m} sym={sym} tf={tf} loading={tfLoading} />
           </div>
 
           <div className="flex border-y border-white/10 bg-[#10141c] text-xs">

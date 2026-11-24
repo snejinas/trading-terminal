@@ -4,6 +4,7 @@
  * geo-restricted the way api.binance.com can be.
  */
 import { ImpactBook, registerInstruments, type BookDepth, type Candle, type Feed, type Instrument, type Side } from "./engine";
+import { BINANCE_TIMEFRAMES, foldCandle } from "./timeframes";
 
 const REST = "https://data-api.binance.vision/api/v3";
 const WS = "wss://data-stream.binance.vision/stream";
@@ -23,6 +24,12 @@ export class BinanceMarket implements Feed {
   open: Record<string, number> = {};
   candles: Record<string, Candle[]> = {};
   connected = false;
+  timeframes = BINANCE_TIMEFRAMES;
+  defaultTimeframe = "1m";
+  /** Higher-timeframe candles, keyed `${sym}|${timeframeId}`. 1m lives in `candles`. */
+  private tf: Record<string, Candle[]> = {};
+  private pending = new Map<string, Promise<void>>();
+  private everOpened = false;
   private books: Record<string, BookDepth> = {};
   private impact = new ImpactBook();
   private bids: Record<string, number> = {};
@@ -63,7 +70,12 @@ export class BinanceMarket implements Feed {
       .join("/");
     const ws = new WebSocket(`${WS}?streams=${streams}`);
     this.ws = ws;
-    ws.onopen = () => (this.connected = true);
+    ws.onopen = () => {
+      this.connected = true;
+      // After a reconnect we may have missed updates: re-sync every higher timeframe we hold.
+      if (this.everOpened) void this.refreshLoaded();
+      this.everOpened = true;
+    };
     ws.onclose = () => {
       this.connected = false;
       if (!this.disposed) this.retry = setTimeout(() => this.connect(), 2000);
@@ -95,6 +107,12 @@ export class BinanceMarket implements Feed {
           if (list.length > 400) list.shift();
         }
         this.price[s] = c.c;
+        // keep every loaded higher timeframe live by folding the 1m update into it
+        for (const key of Object.keys(this.tf)) {
+          if (!key.startsWith(s + "|")) continue;
+          const tfm = this.timeframes.find((t) => t.id === key.slice(s.length + 1));
+          if (tfm) foldCandle(this.tf[key], tfm.ms, c);
+        }
       } else if (d.b !== undefined && d.a !== undefined && d.s) {
         // bookTicker: best bid / ask
         this.bids[d.s] = parseFloat(d.b);
@@ -104,6 +122,47 @@ export class BinanceMarket implements Feed {
   }
 
   tick(): void {}
+
+  candlesFor(sym: string, timeframeId: string): Candle[] {
+    return timeframeId === "1m" ? (this.candles[sym] ?? []) : (this.tf[`${sym}|${timeframeId}`] ?? []);
+  }
+
+  /** Fetch history for a timeframe (once; concurrent calls share one request). 1m is always loaded. */
+  async loadTimeframe(sym: string, timeframeId: string): Promise<void> {
+    if (!this.timeframes.some((t) => t.id === timeframeId)) throw new Error(`Unknown timeframe ${timeframeId}`);
+    if (!this.price[sym]) throw new Error(`Unknown symbol ${sym}`);
+    if (timeframeId === "1m") return;
+    const key = `${sym}|${timeframeId}`;
+    if (this.tf[key]) return;
+    let p = this.pending.get(key);
+    if (!p) {
+      p = this.fetchKlines(sym, timeframeId)
+        .then((rows) => {
+          this.tf[key] = rows;
+        })
+        .finally(() => this.pending.delete(key));
+      this.pending.set(key, p);
+    }
+    await p;
+  }
+
+  private async fetchKlines(sym: string, timeframeId: string): Promise<Candle[]> {
+    const rows = (await fetchJson(`${REST}/klines?symbol=${sym}&interval=${timeframeId}&limit=300`)) as (string | number)[][];
+    return rows.map(toCandle);
+  }
+
+  private async refreshLoaded(): Promise<void> {
+    await Promise.all(
+      Object.keys(this.tf).map(async (key) => {
+        const [sym, id] = key.split("|");
+        try {
+          this.tf[key] = await this.fetchKlines(sym, id);
+        } catch {
+          /* keep the stale candles; the 1m stream keeps folding into them */
+        }
+      })
+    );
+  }
   /** Latest Binance snapshot minus liquidity our own fills have consumed and not yet recovered. */
   depth(sym: string): BookDepth | null {
     const raw = this.books[sym];
