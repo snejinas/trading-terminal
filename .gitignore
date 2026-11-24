@@ -8,6 +8,11 @@ out/
 # compiled output used by the unit tests
 .test-build/
 
+# Playwright output
+test-results/
+playwright-report/
+blob-report/
+
 # env
 .env
 .env.local

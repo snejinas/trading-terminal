@@ -49,6 +49,7 @@ src/lib/trading/
   fees.ts                           fee tiers and settings
   backup.ts / storage.ts            account export/import and browser persistence
 tests/                              unit tests (plain Node scripts, run by `npm test`)
+e2e/                                Playwright browser tests + the mocked Binance (`npm run e2e`)
 ```
 
 ## Tests
@@ -57,8 +58,31 @@ tests/                              unit tests (plain Node scripts, run by `npm 
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
 timeframes, candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
-The browser-level behaviour (chart interaction, order ticket) was checked with Playwright against a mocked
-Binance but those scripts are not part of this repo yet.
+
+### Browser tests (Playwright)
+
+```bash
+npm run e2e:install   # once: downloads Chromium for Playwright
+npm run e2e           # builds the app, starts it on :3100, runs everything in e2e/
+```
+
+The specs drive the real UI against a **mocked Binance** (REST and WebSocket are intercepted, see
+`e2e/support/mockBinance.ts`), so they are deterministic and need no network. The mock's clock is frozen,
+its order book is flat and every minute trades the same volume, which lets the tests assert exact numbers.
+
+| spec | covers |
+| --- | --- |
+| `chart-interaction` | wheel/drag/pinch/keyboard zoom and scroll, older-history paging, staying anchored to live candles |
+| `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
+| `chart-volume` | volume pane scale, bar proportions measured from canvas pixels, toggle, higher-timeframe volume |
+| `order-ticket` | slippage estimates and warnings, two-step confirmation, `!` on the command line, depletion |
+| `fee-tier` | tier / BNB / custom fee popover and the fees it charges |
+| `account-persistence` | reload, cross-tab sync, corrupt and blocked storage, `reset` |
+| `account-backup` | export, import with confirmation, rejection of bad files |
+
+`npm run e2e -- e2e/order-ticket.spec.ts` runs one file; `npm run typecheck:e2e` type-checks the tests.
+Set `E2E_PORT` to use another port. In CI the server is always started fresh; locally an already
+running one on that port is reused.
 
 ## Known limitations
 

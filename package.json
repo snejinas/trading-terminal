@@ -8,7 +8,10 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node tests/run.js"
+    "test": "tsc -p tsconfig.test.json && node tests/run.js",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install chromium"
   },
   "dependencies": {
     "next": "^15.3.0",
@@ -16,6 +19,7 @@
     "react-dom": "^18"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
