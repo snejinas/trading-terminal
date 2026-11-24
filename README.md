@@ -18,10 +18,12 @@ Other scripts: `npm run typecheck`, `npm test`.
 
 ## What it does
 
-- **Live data** (Binance public endpoints, no key): 1m–1D candles, best bid/ask, top-10 order book depth
+- **Live data** (Binance public endpoints, no key): 1m–1D candles with volume, best bid/ask, top-10 order book depth
   for BTC, ETH, SOL, BNB, XRP, DOGE vs USDT. Simulated fallback feed for offline use.
 - **Chart**: candlesticks with a time axis, crosshair/OHLC readout, timeframes (1m, 5m, 15m, 1h, 4h, 1D),
-  wheel zoom at the cursor, drag/pinch/keyboard pan, automatic loading of older history, live updates.
+  wheel zoom at the cursor, drag/pinch/keyboard pan, automatic loading of older history, live updates,
+  and **volume bars** under the candles (own scale fitted to the visible window, volume in the crosshair
+  readout, `Vol` button to hide them; remembered).
 - **Paper account** ($100k): market and limit orders, positions, working orders, fills, P&L.
 - **Realistic fills**: market and marketable-limit orders *walk the order book* level by level and fill at the
   volume-weighted price. Your own fills deplete the book and it recovers over time (5 s half-life).
@@ -53,7 +55,8 @@ tests/                              unit tests (plain Node scripts, run by `npm 
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, and history paging against a fake exchange.
+timeframes, candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+history paging against a fake exchange.
 The browser-level behaviour (chart interaction, order ticket) was checked with Playwright against a mocked
 Binance but those scripts are not part of this repo yet.
 
@@ -62,12 +65,13 @@ Binance but those scripts are not part of this repo yet.
 - Fills are instant: no latency, queue position or partial fills of resting orders.
 - Depth is limited to the top 10 levels; a market order bigger than that is rejected rather than estimated.
 - Fees are charged in USDT (even with the BNB discount toggle) and there is no volume-based tier logic.
-- Higher-timeframe volume/price is kept live by folding the 1m stream; a brief gap can leave a candle's
-  high/low slightly off until the next reconnect resync.
+- Higher-timeframe candles are kept live by folding the 1m stream (volume is added as increments). A brief gap
+  can leave a candle's high/low or volume slightly off until the next reconnect resync, and loading a timeframe
+  between two stream messages can count a fraction of a second of volume twice.
+- Volume is in base-asset units (e.g. BTC); the simulated feed's volume is synthetic.
 - Account data lives only in one browser's `localStorage` (use Export for backups).
 
 ## Provenance
 
 Extracted from `snejinas/lifeinception3` (branch `ccr-9dde7727-3qdzwq`) with its commit history, so this
-project could live in its own repository. The `WIP: volume data layer` commit is unfinished: candles carry
-volume, but the chart does not draw volume bars yet.
+project could live in its own repository. Volume bars were finished here after the extraction.

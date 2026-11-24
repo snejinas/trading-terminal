@@ -30,7 +30,18 @@ import {
   type BackupSummary,
 } from "@/lib/trading/backup";
 import { SLIPPAGE_SEVERE_BPS, estimateSlippage, slippageLine } from "@/lib/trading/slippage";
-import { appendedSince, clampOffset, maxOffset, resolveCount, windowStart, zoomAt, type View } from "@/lib/trading/chartview";
+import {
+  appendedSince,
+  clampOffset,
+  formatVolume,
+  loadVolumePref,
+  maxOffset,
+  resolveCount,
+  saveVolumePref,
+  windowStart,
+  zoomAt,
+  type View,
+} from "@/lib/trading/chartview";
 import { formatAxisTime, formatFullTime, loadTimeframeId, saveTimeframeId } from "@/lib/trading/timeframes";
 import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
@@ -71,6 +82,8 @@ function describeFill(f: Fill): string {
 
 const AXIS_W = 72; // right-hand price axis
 const PAD = 12; // top padding inside the plot
+const UP_DIM = "rgba(38, 208, 124, 0.45)"; // volume bars: the candle colours, softened
+const DOWN_DIM = "rgba(255, 91, 110, 0.45)";
 
 function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: string; loading: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -82,6 +95,8 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const older = useRef({ busy: false, loading: false, retryAt: 0, done: new Set<string>() });
   const [scrolled, setScrolled] = useState(false);
   const [zoomed, setZoomed] = useState(false);
+  const [volShown, setVolShown] = useState(loadVolumePref); // volume pane on/off (remembered)
+  const volOn = useRef(volShown);
 
   const draw = useCallback(() => {
     const cv = ref.current;
@@ -137,6 +152,19 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     cv.dataset.loaded = String(all.length);
     cv.dataset.start = start.toFixed(2);
 
+    // ── panes: price on top, volume underneath (only when the visible candles carry volume) ──
+    const hasVol = volOn.current && data.some((c) => c.v !== undefined);
+    const volH = hasVol ? Math.min(90, Math.max(36, Math.round(plotH * 0.18))) : 0;
+    const priceBottom = plotH - (hasVol ? volH + 6 : 0);
+    const volBottom = plotH;
+    const volUsable = Math.max(1, volH - 14); // headroom for the pane label
+    let maxV = 0;
+    if (hasVol) for (const c of data) maxV = Math.max(maxV, c.v ?? 0);
+    maxV = Math.max(maxV, 1e-12);
+    cv.dataset.vol = hasVol ? "1" : "0";
+    cv.dataset.volh = String(volH);
+    cv.dataset.maxv = hasVol ? String(maxV) : "";
+
     // near the oldest loaded candle: fetch another page of history (once at a time, retry after a pause)
     if (start < 5) {
       const key = `${sym}|${tf}`;
@@ -166,13 +194,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     const margin = (hi - lo) * 0.08 || hi * 0.001;
     lo -= margin;
     hi += margin;
-    const y = (p: number) => pad + ((hi - p) / (hi - lo)) * (plotH - pad);
+    const y = (p: number) => pad + ((hi - p) / (hi - lo)) * (priceBottom - pad);
 
     // last price geometry (the label is pinned to the plot edge when the price is off screen)
     const lastC = all[all.length - 1];
     const lc = lastC.c >= lastC.o ? UP : DOWN;
     const rawY = y(lastC.c);
-    const ly = Math.min(Math.max(Math.round(rawY), pad + 9), plotH - 9) + 0.5;
+    const ly = Math.min(Math.max(Math.round(rawY), pad + 9), priceBottom - 9) + 0.5;
 
     // grid + price axis
     ctx.strokeStyle = "rgba(255,255,255,0.06)";
@@ -219,6 +247,27 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.fillRect(x - bw / 2, y(Math.max(c.o, c.c)), bw, Math.max(1, Math.abs(y(c.o) - y(c.c))));
     });
 
+    // volume pane
+    if (hasVol) {
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      ctx.beginPath();
+      ctx.moveTo(0, priceBottom + 3.5);
+      ctx.lineTo(plotW, priceBottom + 3.5);
+      ctx.stroke();
+      data.forEach((c, k) => {
+        if (c.v === undefined) return;
+        const x = xOf(first + k);
+        if (x < -bw || x > plotW + bw) return;
+        const bh = Math.max(1, (c.v / maxV) * volUsable);
+        ctx.fillStyle = c.c >= c.o ? UP_DIM : DOWN_DIM;
+        ctx.fillRect(x - bw / 2, volBottom - bh, bw, bh);
+      });
+      ctx.fillStyle = "#7d8799";
+      const newest = data[data.length - 1];
+      ctx.fillText(`Vol ${newest?.v !== undefined ? formatVolume(newest.v) : ""}`, 10, priceBottom + 15);
+      ctx.fillText(formatVolume(maxV), plotW + 8, volBottom - volUsable); // axis: height of the tallest bar
+    }
+
     // marker where the available history begins
     if (start < 0 && older.current.done.has(`${sym}|${tf}`)) {
       const x0 = Math.round(xOf(0) - step / 2) + 0.5;
@@ -236,7 +285,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     }
 
     // last price: line when it is on screen, label always (pinned to the edge when it is off screen)
-    if (rawY >= pad && rawY <= plotH) {
+    if (rawY >= pad && rawY <= priceBottom) {
       ctx.setLineDash([4, 4]);
       ctx.strokeStyle = lc;
       ctx.beginPath();
@@ -267,27 +316,30 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.lineTo(plotW, m.y + 0.5);
       ctx.stroke();
       ctx.setLineDash([]);
-      const price = hi - ((m.y - pad) / (plotH - pad)) * (hi - lo);
+      const inVol = hasVol && m.y > priceBottom;
+      const tag = inVol
+        ? formatVolume(Math.max(0, ((volBottom - m.y) / volUsable) * maxV))
+        : fmt(hi - ((m.y - pad) / (priceBottom - pad)) * (hi - lo), dp);
       ctx.fillStyle = "#2a3140";
       ctx.fillRect(plotW + 2, m.y - 9, axisW - 2, 18);
       ctx.fillStyle = "#e6eaf2";
-      ctx.fillText(fmt(price, dp), plotW + 8, m.y);
+      ctx.fillText(tag, plotW + 8, m.y);
       const hoverIdx = Math.floor(m.x / step + start);
       if (hoverIdx >= 0 && hoverIdx < all.length) {
         const c = all[hoverIdx];
         // time tag on the x axis
-        const tag = formatFullTime(c.t, tfMs);
-        const tw = ctx.measureText(tag).width + 12;
+        const timeTag = formatFullTime(c.t, tfMs);
+        const tw = ctx.measureText(timeTag).width + 12;
         const tx = Math.min(Math.max(xOf(hoverIdx) - tw / 2, 0), plotW - tw);
         ctx.fillStyle = "#2a3140";
         ctx.fillRect(tx, plotH + 3, tw, 18);
         ctx.fillStyle = "#e6eaf2";
         ctx.textAlign = "center";
-        ctx.fillText(tag, tx + tw / 2, plotH + 12);
+        ctx.fillText(timeTag, tx + tw / 2, plotH + 12);
         ctx.textAlign = "left";
         // OHLC readout at the top-left of the plot
         const chg = c.o ? (c.c / c.o - 1) * 100 : 0;
-        const ro = `O ${fmt(c.o, dp)}  H ${fmt(c.h, dp)}  L ${fmt(c.l, dp)}  C ${fmt(c.c, dp)}  ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`;
+        const ro = `O ${fmt(c.o, dp)}  H ${fmt(c.h, dp)}  L ${fmt(c.l, dp)}  C ${fmt(c.c, dp)}  ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%${c.v !== undefined ? `  V ${formatVolume(c.v)}` : ""}`;
         const rw = ctx.measureText(ro).width + 12;
         ctx.fillStyle = "rgba(11,14,20,0.85)";
         ctx.fillRect(4, 2, rw, 18);
@@ -332,6 +384,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     [geom, commit]
   );
   const reset = useCallback(() => commit(0, null), [commit]);
+  const toggleVol = useCallback(() => {
+    const next = !volOn.current;
+    volOn.current = next;
+    setVolShown(next);
+    saveVolumePref(next);
+    drawRef.current();
+  }, []);
 
   // changing symbol or timeframe returns to the live edge (the zoom level is kept)
   useEffect(() => {
@@ -464,6 +523,15 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
             Live ▸
           </button>
         )}
+        <button
+          aria-label="Volume"
+          aria-pressed={volShown}
+          title={volShown ? "Hide volume" : "Show volume"}
+          onClick={toggleVol}
+          className={`${btn} ${volShown ? "text-white" : "text-slate-500"}`}
+        >
+          Vol
+        </button>
         <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1.25)} className={btn}>
           −
         </button>
