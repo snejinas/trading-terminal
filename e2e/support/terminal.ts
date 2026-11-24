@@ -78,3 +78,20 @@ export async function pressedTimeframes(page: Page): Promise<string> {
 
 export const clickTimeframe = (page: Page, label: string) =>
   timeframeGroup(page).getByRole("button", { name: label, exact: true }).click();
+
+export interface MaReading {
+  label: string;
+  value: number | null;
+}
+
+/** The moving-average legend as drawn: value under the cursor if hovering, else at the newest visible candle. */
+export const chartMas = (page: Page): Promise<MaReading[]> =>
+  chartCanvas(page).evaluate((c) => JSON.parse((c as HTMLCanvasElement).dataset.ma ?? "[]"));
+
+/** Move the mouse over the candle `back` candles before the newest one (only valid while at the live edge). */
+export async function hoverCandle(page: Page, back: number, y = 140): Promise<void> {
+  const box = (await chartCanvas(page).boundingBox())!;
+  const s = await chartState(page);
+  const step = (box.width - 84) / s.count;
+  await page.mouse.move(box.x + (s.loaded - 1 - back - s.start + 0.5) * step, box.y + y);
+}

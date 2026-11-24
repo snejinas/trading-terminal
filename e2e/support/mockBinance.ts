@@ -51,6 +51,12 @@ export interface MockOptions {
   depth?: { size?: string; stepFraction?: number };
   /** Live quotes: constant (default) or following the same wave as the history. */
   livePrice?: "flat" | "wave";
+  /**
+   * Shape of 1-minute history. "ramp": the candle k minutes from the (frozen) current minute is
+   * open base+k, high base+k+1, low base+k-1, close base+k+0.5, so moving averages have closed forms
+   * (the live candle itself closes at the flat base price). Other intervals always use the wave.
+   */
+  history?: "wave" | "ramp";
 }
 
 export interface Mock {
@@ -111,7 +117,13 @@ export async function installMockBinance(context: BrowserContext, options: MockO
     const rows: (string | number)[][] = [];
     for (let t = Math.floor(endTime / ms) * ms; rows.length < limit && t + ms > floor; t -= ms) {
       const p = wave(sym, t);
-      const row: (string | number)[] = [t, String(p), String(p * 1.0006), String(p * 0.9994), String(wave(sym, t + ms - 1))];
+      const row: (string | number)[] =
+        o.history === "ramp" && interval === "1m"
+          ? ((k: number, b: number) => [t, String(b + k), String(b + k + 1), String(b + k - 1), String(b + k + 0.5)])(
+              (t - Math.floor(startedAt / MIN) * MIN) / MIN,
+              BASE_PRICES[sym]
+            )
+          : [t, String(p), String(p * 1.0006), String(p * 0.9994), String(wave(sym, t + ms - 1))];
       if (o.volume) row.push(String(volumeOf(t, ms)));
       rows.unshift(row);
     }

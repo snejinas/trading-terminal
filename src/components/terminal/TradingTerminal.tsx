@@ -11,6 +11,16 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  MA_COLORS,
+  MA_MAX_PERIOD,
+  MA_MIN_PERIOD,
+  computeMovingAverages,
+  loadMaConfig,
+  maLabel,
+  saveMaConfig,
+  type MaSlot,
+} from "@/lib/trading/indicators";
+import {
   DEFAULT_FEE_CONFIG,
   FEE_TIERS,
   MAX_CUSTOM_PCT,
@@ -85,6 +95,47 @@ const PAD = 12; // top padding inside the plot
 const UP_DIM = "rgba(38, 208, 124, 0.45)"; // volume bars: the candle colours, softened
 const DOWN_DIM = "rgba(255, 91, 110, 0.45)";
 
+function MaRow({ index, slot, onChange }: { index: number; slot: MaSlot; onChange: (s: MaSlot) => void }) {
+  const [draft, setDraft] = useState(String(slot.period));
+  useEffect(() => setDraft(String(slot.period)), [slot.period]);
+  const n = Number(draft);
+  const valid = draft.trim() !== "" && Number.isInteger(n) && n >= MA_MIN_PERIOD && n <= MA_MAX_PERIOD;
+  const n1 = index + 1;
+  return (
+    <div className="flex items-center gap-2 py-0.5">
+      <input
+        type="checkbox"
+        aria-label={`Show moving average ${n1}`}
+        checked={slot.enabled}
+        onChange={(e) => onChange({ ...slot, enabled: e.target.checked })}
+      />
+      <span className="inline-block h-0.5 w-3" style={{ background: MA_COLORS[index] }} />
+      <select
+        aria-label={`Moving average ${n1} type`}
+        value={slot.type}
+        onChange={(e) => onChange({ ...slot, type: e.target.value === "ema" ? "ema" : "sma" })}
+        className="rounded border border-white/15 bg-[#0b0e14] px-1 py-0.5 text-slate-200"
+      >
+        <option value="sma">SMA</option>
+        <option value="ema">EMA</option>
+      </select>
+      <input
+        inputMode="numeric"
+        aria-label={`Moving average ${n1} period`}
+        aria-invalid={!valid}
+        value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const v = Number(e.target.value);
+          if (e.target.value.trim() !== "" && Number.isInteger(v) && v >= MA_MIN_PERIOD && v <= MA_MAX_PERIOD) onChange({ ...slot, period: v });
+        }}
+        onBlur={() => setDraft(String(slot.period))}
+        className={`w-14 rounded border bg-[#0b0e14] px-1 py-0.5 text-right text-slate-200 ${valid ? "border-white/15" : "border-red-500"}`}
+      />
+    </div>
+  );
+}
+
 function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: string; loading: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const mouse = useRef<{ x: number; y: number } | null>(null);
@@ -97,6 +148,11 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const [zoomed, setZoomed] = useState(false);
   const [volShown, setVolShown] = useState(loadVolumePref); // volume pane on/off (remembered)
   const volOn = useRef(volShown);
+  const [maCfg, setMaCfg] = useState<MaSlot[]>(loadMaConfig); // moving averages (remembered)
+  const maRef = useRef(maCfg);
+  const [maOpen, setMaOpen] = useState(false);
+  const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
+  const controls = useRef<HTMLDivElement>(null);
 
   const draw = useCallback(() => {
     const cv = ref.current;
@@ -151,6 +207,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     cv.dataset.count = String(count);
     cv.dataset.loaded = String(all.length);
     cv.dataset.start = start.toFixed(2);
+
+    // moving averages run over everything loaded (so they are already warm at the left edge of the window)
+    const cfg = maRef.current;
+    const maKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${JSON.stringify(cfg)}`;
+    if (maCache.current?.key !== maKey) maCache.current = { key: maKey, series: computeMovingAverages(all, cfg) };
+    const maSeries = maCache.current.series;
 
     // ── panes: price on top, volume underneath (only when the visible candles carry volume) ──
     const hasVol = volOn.current && data.some((c) => c.v !== undefined);
@@ -247,6 +309,35 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.fillRect(x - bw / 2, y(Math.max(c.o, c.c)), bw, Math.max(1, Math.abs(y(c.o) - y(c.c))));
     });
 
+    // moving averages (not part of the price autoscale), clipped to the price pane
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, plotW, priceBottom);
+    ctx.clip();
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = "round";
+    const lastIdx = Math.min(all.length, Math.ceil(start + count) + 1);
+    maSeries.forEach((ser, si) => {
+      if (!ser) return;
+      ctx.strokeStyle = MA_COLORS[si];
+      ctx.beginPath();
+      let pen = false;
+      for (let k = Math.max(0, first - 1); k < lastIdx; k++) {
+        const val = ser[k];
+        if (val === null || !Number.isFinite(val)) {
+          pen = false;
+          continue;
+        }
+        if (pen) ctx.lineTo(xOf(k), y(val));
+        else {
+          ctx.moveTo(xOf(k), y(val));
+          pen = true;
+        }
+      }
+      ctx.stroke();
+    });
+    ctx.restore();
+
     // volume pane
     if (hasVol) {
       ctx.strokeStyle = "rgba(255,255,255,0.08)";
@@ -280,7 +371,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.setLineDash([]);
       ctx.fillStyle = "#7d8799";
       ctx.textAlign = "right";
-      ctx.fillText("start of history", x0 - 6, 34);
+      ctx.fillText("start of history", x0 - 6, 46);
       ctx.textAlign = "left";
     }
 
@@ -301,7 +392,35 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
 
     if (older.current.loading) {
       ctx.fillStyle = "#7d8799";
-      ctx.fillText("loading history…", 10, 34);
+      ctx.fillText("loading history…", 10, 46);
+    }
+
+    // moving-average legend: the value under the cursor, else at the newest visible candle
+    {
+      const hm = mouse.current;
+      const hIdx = hm && hm.x < plotW && hm.y < plotH ? Math.floor(hm.x / step + start) : -1;
+      const at = hIdx >= 0 && hIdx < all.length ? hIdx : Math.min(all.length, Math.ceil(start + count)) - 1;
+      const shown: { text: string; color: string }[] = [];
+      const report: { label: string; value: number | null }[] = [];
+      cfg.forEach((slot, si) => {
+        const ser = maSeries[si];
+        if (!ser) return;
+        const val = ser[at] ?? null;
+        report.push({ label: maLabel(slot), value: val });
+        shown.push({ text: `${maLabel(slot)} ${val === null ? "—" : fmt(val, dp)}`, color: MA_COLORS[si] });
+      });
+      cv.dataset.ma = JSON.stringify(report);
+      if (shown.length) {
+        let x = 10;
+        const total = shown.reduce((a, it) => a + ctx.measureText(it.text).width + 14, -14);
+        ctx.fillStyle = "rgba(11,14,20,0.6)";
+        ctx.fillRect(4, 22, total + 12, 16);
+        for (const it of shown) {
+          ctx.fillStyle = it.color;
+          ctx.fillText(it.text, x, 30);
+          x += ctx.measureText(it.text).width + 14;
+        }
+      }
     }
 
     // crosshair
@@ -384,6 +503,29 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     [geom, commit]
   );
   const reset = useCallback(() => commit(0, null), [commit]);
+  const updateMa = useCallback((index: number, slot: MaSlot) => {
+    const next = maRef.current.map((s, i) => (i === index ? slot : s));
+    maRef.current = next;
+    setMaCfg(next);
+    saveMaConfig(next);
+    drawRef.current();
+  }, []);
+  // the moving-average popover closes on Escape or a click outside it
+  useEffect(() => {
+    if (!maOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (controls.current && !controls.current.contains(e.target as Node)) setMaOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMaOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [maOpen]);
   const toggleVol = useCallback(() => {
     const next = !volOn.current;
     volOn.current = next;
@@ -517,7 +659,8 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
         onDoubleClick={reset}
         onKeyDown={onKeyDown}
       />
-      <div className="absolute right-[84px] top-1.5 flex items-center gap-1 text-xs">
+      <div ref={controls} className="absolute right-[84px] top-1.5 text-xs">
+      <div className="flex items-center justify-end gap-1">
         {scrolled && (
           <button onClick={() => commit(0, view.current.count)} className="rounded bg-[#26d07c] px-2 py-0.5 font-bold text-[#0b0e14]">
             Live ▸
@@ -532,6 +675,16 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
         >
           Vol
         </button>
+        <button
+          aria-label="Moving averages"
+          aria-pressed={maCfg.some((s) => s.enabled)}
+          aria-expanded={maOpen}
+          title="Moving averages"
+          onClick={() => setMaOpen((o) => !o)}
+          className={`${btn} ${maCfg.some((s) => s.enabled) ? "text-white" : "text-slate-500"}`}
+        >
+          MA
+        </button>
         <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1.25)} className={btn}>
           −
         </button>
@@ -543,6 +696,14 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
             Reset
           </button>
         )}
+      </div>
+      {maOpen && (
+        <div role="dialog" aria-label="Moving averages" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
+          {maCfg.map((slot, i) => (
+            <MaRow key={i} index={i} slot={slot} onChange={(next) => updateMa(i, next)} />
+          ))}
+        </div>
+      )}
       </div>
     </div>
   );
