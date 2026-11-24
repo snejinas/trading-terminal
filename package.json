@@ -1,0 +1,27 @@
+{
+  "name": "trading-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Paper-trading terminal: live Binance market data, depth-walking fills, fees, slippage warnings. No real orders.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node tests/run.js"
+  },
+  "dependencies": {
+    "next": "^15.3.0",
+    "react": "^18",
+    "react-dom": "^18"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.0.1",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
+  }
+}

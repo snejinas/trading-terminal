@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# compiled output used by the unit tests
+.test-build/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# misc
+.DS_Store
+npm-debug.log*
+*.tsbuildinfo
+next-env.d.ts
