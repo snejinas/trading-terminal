@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
   DEFAULT_FEE_CONFIG,
@@ -22,6 +30,7 @@ import {
   type BackupSummary,
 } from "@/lib/trading/backup";
 import { SLIPPAGE_SEVERE_BPS, estimateSlippage, slippageLine } from "@/lib/trading/slippage";
+import { appendedSince, clampOffset, maxOffset, resolveCount, windowStart, zoomAt, type View } from "@/lib/trading/chartview";
 import { formatAxisTime, formatFullTime, loadTimeframeId, saveTimeframeId } from "@/lib/trading/timeframes";
 import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
@@ -60,10 +69,19 @@ function describeFill(f: Fill): string {
 
 // ─── Candlestick chart ──────────────────────────────────────────────────────
 
+const AXIS_W = 72; // right-hand price axis
+const PAD = 12; // top padding inside the plot
+
 function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: string; loading: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const mouse = useRef<{ x: number; y: number } | null>(null);
-  const [, bump] = useState(0);
+  // Viewport: how many candles are visible (zoom) and how far back from the newest the window sits.
+  const view = useRef<View>({ count: null, offset: 0 });
+  const lastT = useRef<number | null>(null); // newest candle time seen, to keep a scrolled-back window anchored
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const older = useRef({ busy: false, loading: false, retryAt: 0, done: new Set<string>() });
+  const [scrolled, setScrolled] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
 
   const draw = useCallback(() => {
     const cv = ref.current;
@@ -80,26 +98,64 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     ctx.clearRect(0, 0, w, h);
 
     const dp = dpFor(sym);
-    const axisW = 72;
-    const pad = 12;
+    const axisW = AXIS_W;
+    const pad = PAD;
     const plotW = w - axisW - pad;
     const plotH = h - 24;
     const tfm = market.timeframes.find((x) => x.id === tf);
     const tfMs = tfm?.ms ?? 60_000;
     const all = market.candlesFor(sym, tf);
-    const n = Math.max(20, Math.min(90, Math.floor(plotW / 8)));
-    const data = all.slice(-n);
-    if (data.length === 0) {
-      ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textBaseline = "middle";
+    if (all.length === 0) {
       ctx.fillStyle = "#7d8799";
       ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
       ctx.fillText(loading ? `Loading ${tfm?.label ?? tf} candles…` : "No candle data", plotW / 2, plotH / 2);
       ctx.textAlign = "left";
       return;
     }
-    // with fewer candles than slots (short history), keep the newest candle at the right edge
-    const slot = n - data.length;
+
+    // ── viewport ──
+    const v = view.current;
+    const newest = all[all.length - 1].t;
+    if (lastT.current !== null && v.offset > 0) {
+      // while scrolled back, new candles must not drag the window along: stay anchored in time
+      const added = appendedSince(all, lastT.current);
+      if (added > 0) v.offset += added;
+    }
+    lastT.current = newest;
+    const count = resolveCount(v, plotW);
+    v.offset = clampOffset(v.offset, count, all.length);
+    setScrolled(v.offset > 0.5);
+    const start = windowStart(all.length, v.offset, count); // float index of the left edge (may be negative)
+    const first = Math.max(0, Math.floor(start));
+    const data = all.slice(first, Math.min(all.length, Math.ceil(start + count)));
+    const step = plotW / count;
+    const xOf = (idx: number) => (idx - start + 0.5) * step;
+    cv.dataset.offset = v.offset.toFixed(2);
+    cv.dataset.count = String(count);
+    cv.dataset.loaded = String(all.length);
+    cv.dataset.start = start.toFixed(2);
+
+    // near the oldest loaded candle: fetch another page of history (once at a time, retry after a pause)
+    if (start < 5) {
+      const key = `${sym}|${tf}`;
+      const o = older.current;
+      if (!o.done.has(key) && !o.busy && Date.now() >= o.retryAt) {
+        o.busy = o.loading = true;
+        market
+          .loadOlder(sym, tf)
+          .then((r) => {
+            if (r.done) o.done.add(key);
+          })
+          .catch(() => {
+            o.retryAt = Date.now() + 5000;
+          })
+          .finally(() => {
+            o.busy = o.loading = false;
+          });
+      }
+    }
 
     let lo = Infinity;
     let hi = -Infinity;
@@ -111,10 +167,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     lo -= margin;
     hi += margin;
     const y = (p: number) => pad + ((hi - p) / (hi - lo)) * (plotH - pad);
-    const step = plotW / n;
 
-    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
-    ctx.textBaseline = "middle";
+    // last price geometry (the label is pinned to the plot edge when the price is off screen)
+    const lastC = all[all.length - 1];
+    const lc = lastC.c >= lastC.o ? UP : DOWN;
+    const rawY = y(lastC.c);
+    const ly = Math.min(Math.max(Math.round(rawY), pad + 9), plotH - 9) + 0.5;
 
     // grid + price axis
     ctx.strokeStyle = "rgba(255,255,255,0.06)";
@@ -127,17 +185,17 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.moveTo(0, yy);
       ctx.lineTo(plotW, yy);
       ctx.stroke();
-      ctx.fillText(fmt(p, dp), plotW + 8, yy);
+      if (Math.abs(yy - ly) > 12) ctx.fillText(fmt(p, dp), plotW + 8, yy); // leave room for the last-price label
     }
 
-    // time axis: labels anchored to absolute candle index so they stay put as new candles arrive
+    // time axis: labels anchored to absolute candle index so they stay put as you pan or new candles arrive
     ctx.fillStyle = "#7d8799";
     ctx.textAlign = "center";
     const every = Math.max(1, Math.ceil(110 / step));
-    const offset = all.length - data.length;
-    data.forEach((c, i) => {
-      if ((offset + i) % every !== 0) return;
-      const x = (slot + i) * step + step / 2;
+    data.forEach((c, k) => {
+      const idx = first + k;
+      if (idx % every !== 0) return;
+      const x = xOf(idx);
       if (x < 30 || x > plotW - 30) return;
       ctx.strokeStyle = "rgba(255,255,255,0.06)";
       ctx.beginPath();
@@ -149,34 +207,53 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     ctx.textAlign = "left";
 
     // candles
-    data.forEach((c, i) => {
-      const x = (slot + i) * step + step / 2;
-      const up = c.c >= c.o;
-      ctx.strokeStyle = ctx.fillStyle = up ? UP : DOWN;
+    const bw = Math.min(16, Math.max(1, step * 0.64));
+    data.forEach((c, k) => {
+      const x = xOf(first + k);
+      if (x < -bw || x > plotW + bw) return;
+      ctx.strokeStyle = ctx.fillStyle = c.c >= c.o ? UP : DOWN;
       ctx.beginPath();
       ctx.moveTo(Math.round(x) + 0.5, y(c.h));
       ctx.lineTo(Math.round(x) + 0.5, y(c.l));
       ctx.stroke();
-      const top = y(Math.max(c.o, c.c));
-      const bh = Math.max(1, Math.abs(y(c.o) - y(c.c)));
-      ctx.fillRect(x - step * 0.32, top, step * 0.64, bh);
+      ctx.fillRect(x - bw / 2, y(Math.max(c.o, c.c)), bw, Math.max(1, Math.abs(y(c.o) - y(c.c))));
     });
 
-    // last price line
-    const last = data[data.length - 1];
-    const ly = Math.round(y(last.c)) + 0.5;
-    const lc = last.c >= last.o ? UP : DOWN;
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = lc;
-    ctx.beginPath();
-    ctx.moveTo(0, ly);
-    ctx.lineTo(plotW, ly);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    // marker where the available history begins
+    if (start < 0 && older.current.done.has(`${sym}|${tf}`)) {
+      const x0 = Math.round(xOf(0) - step / 2) + 0.5;
+      ctx.setLineDash([2, 4]);
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      ctx.moveTo(x0, 0);
+      ctx.lineTo(x0, plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#7d8799";
+      ctx.textAlign = "right";
+      ctx.fillText("start of history", x0 - 6, 34);
+      ctx.textAlign = "left";
+    }
+
+    // last price: line when it is on screen, label always (pinned to the edge when it is off screen)
+    if (rawY >= pad && rawY <= plotH) {
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = lc;
+      ctx.beginPath();
+      ctx.moveTo(0, ly);
+      ctx.lineTo(plotW, ly);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     ctx.fillStyle = lc;
     ctx.fillRect(plotW + 2, ly - 9, axisW - 2, 18);
     ctx.fillStyle = "#0b0e14";
-    ctx.fillText(fmt(last.c, dp), plotW + 8, ly);
+    ctx.fillText(fmt(lastC.c, dp), plotW + 8, ly);
+
+    if (older.current.loading) {
+      ctx.fillStyle = "#7d8799";
+      ctx.fillText("loading history…", 10, 34);
+    }
 
     // crosshair
     const m = mouse.current;
@@ -195,21 +272,20 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.fillRect(plotW + 2, m.y - 9, axisW - 2, 18);
       ctx.fillStyle = "#e6eaf2";
       ctx.fillText(fmt(price, dp), plotW + 8, m.y);
-      const hover = Math.floor(m.x / step) - slot; // negative = cursor is over the empty area left of the first candle
-      const idx = Math.min(data.length - 1, Math.max(0, hover));
-      const c = data[idx];
-      if (hover >= 0) {
+      const hoverIdx = Math.floor(m.x / step + start);
+      if (hoverIdx >= 0 && hoverIdx < all.length) {
+        const c = all[hoverIdx];
         // time tag on the x axis
         const tag = formatFullTime(c.t, tfMs);
         const tw = ctx.measureText(tag).width + 12;
-        const tx = Math.min(Math.max((slot + idx) * step + step / 2 - tw / 2, 0), plotW - tw);
+        const tx = Math.min(Math.max(xOf(hoverIdx) - tw / 2, 0), plotW - tw);
         ctx.fillStyle = "#2a3140";
         ctx.fillRect(tx, plotH + 3, tw, 18);
         ctx.fillStyle = "#e6eaf2";
         ctx.textAlign = "center";
         ctx.fillText(tag, tx + tw / 2, plotH + 12);
         ctx.textAlign = "left";
-        // OHLC readout at the top-left of the plot (the bottom strip is now the time axis)
+        // OHLC readout at the top-left of the plot
         const chg = c.o ? (c.c / c.o - 1) * 100 : 0;
         const ro = `O ${fmt(c.o, dp)}  H ${fmt(c.h, dp)}  L ${fmt(c.l, dp)}  C ${fmt(c.c, dp)}  ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`;
         const rw = ctx.measureText(ro).width + 12;
@@ -220,6 +296,50 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       }
     }
   }, [market, sym, tf, loading]);
+
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
+
+  // ── view operations ──
+  const geom = useCallback(() => {
+    const cv = ref.current!;
+    const plotW = Math.max(50, cv.clientWidth - AXIS_W - PAD);
+    const all = market.candlesFor(sym, tf);
+    const count = resolveCount(view.current, plotW);
+    return { plotW, all, count, step: plotW / count };
+  }, [market, sym, tf]);
+  const commit = useCallback((offset: number, count: number | null) => {
+    view.current = { count, offset };
+    setScrolled(offset > 0.5);
+    setZoomed(count !== null);
+    drawRef.current();
+  }, []);
+  /** Scroll by `candles` (positive = back in time). */
+  const panBy = useCallback(
+    (candles: number) => {
+      const g = geom();
+      commit(clampOffset(view.current.offset + candles, g.count, g.all.length), view.current.count);
+    },
+    [geom, commit]
+  );
+  /** Zoom by `factor` (<1 in, >1 out), keeping the candle at `frac` (0..1 across the plot) in place. */
+  const zoomBy = useCallback(
+    (factor: number, frac = 1) => {
+      const g = geom();
+      const r = zoomAt(view.current, g.count, g.all.length, frac, factor);
+      commit(r.offset, r.count);
+    },
+    [geom, commit]
+  );
+  const reset = useCallback(() => commit(0, null), [commit]);
+
+  // changing symbol or timeframe returns to the live edge (the zoom level is kept)
+  useEffect(() => {
+    view.current.offset = 0;
+    lastT.current = null;
+    setScrolled(false);
+    drawRef.current();
+  }, [sym, tf]);
 
   useEffect(() => {
     draw();
@@ -232,21 +352,131 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     };
   }, [draw]);
 
+  // wheel: zoom at the cursor; shift+wheel or a horizontal wheel/trackpad swipe pans.
+  // Needs a non-passive native listener so the page doesn't scroll underneath.
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const g = geom();
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+      const dx = e.deltaX * unit;
+      const dy = Math.max(-120, Math.min(120, e.deltaY * unit));
+      if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) panBy(-(dx || dy) / g.step);
+      else zoomBy(Math.exp(dy * 0.0015), (e.clientX - cv.getBoundingClientRect().left) / g.plotW);
+    };
+    cv.addEventListener("wheel", onWheel, { passive: false });
+    return () => cv.removeEventListener("wheel", onWheel);
+  }, [geom, panBy, zoomBy]);
+
+  // ── pointer input: one pointer pans, two pinch-zoom ──
+  const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId); // keeps the drag going outside the canvas
+    } catch {
+      /* not an active pointer (e.g. synthetic event): panning still works while over the canvas */
+    }
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (e.pointerType !== "mouse") mouse.current = null;
+    e.currentTarget.style.cursor = "grabbing";
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    if (e.pointerType === "mouse") mouse.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+    const prev = pointers.current.get(e.pointerId);
+    if (prev) {
+      const g = geom();
+      if (pointers.current.size === 1) {
+        panBy((e.clientX - prev.x) / g.step);
+      } else if (pointers.current.size === 2) {
+        const other = [...pointers.current.entries()].find(([id]) => id !== e.pointerId)![1];
+        const d0 = Math.hypot(prev.x - other.x, prev.y - other.y);
+        const d1 = Math.hypot(e.clientX - other.x, e.clientY - other.y);
+        if (d0 > 10 && d1 > 10) zoomBy(d0 / d1, ((e.clientX + other.x) / 2 - r.left) / g.plotW);
+      }
+      pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    drawRef.current();
+  };
+  const onPointerEnd = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size === 0) e.currentTarget.style.cursor = "";
+  };
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLCanvasElement>) => {
+    const g = geom();
+    const page = Math.max(1, Math.round(g.count * (e.shiftKey ? 1 : 0.1)));
+    switch (e.key) {
+      case "ArrowLeft":
+        panBy(page);
+        break;
+      case "ArrowRight":
+        panBy(-page);
+        break;
+      case "+":
+      case "=":
+        zoomBy(0.8);
+        break;
+      case "-":
+      case "_":
+        zoomBy(1.25);
+        break;
+      case "Home":
+        commit(maxOffset(g.all.length, g.count), view.current.count);
+        break;
+      case "End":
+      case "0":
+        commit(0, view.current.count);
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  };
+
+  const btn = "rounded border border-white/15 bg-[#10141c]/90 px-2 py-0.5 text-slate-300 hover:bg-white/10";
   return (
-    <canvas
-      ref={ref}
-      className="h-full w-full"
-      onMouseMove={(e) => {
-        const r = e.currentTarget.getBoundingClientRect();
-        mouse.current = { x: e.clientX - r.left, y: e.clientY - r.top };
-        draw();
-        bump((v) => v + 1);
-      }}
-      onMouseLeave={() => {
-        mouse.current = null;
-        draw();
-      }}
-    />
+    <div className="relative h-full w-full">
+      <canvas
+        ref={ref}
+        className="h-full w-full cursor-grab touch-none focus-visible:[outline-offset:-2px]"
+        tabIndex={0}
+        role="application"
+        aria-label="Price chart. Scroll to zoom, drag to pan, arrow keys scroll, plus and minus zoom, End returns to the latest candle."
+        title="Scroll to zoom · drag to pan · double-click to reset"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
+        onPointerLeave={() => {
+          if (pointers.current.size === 0) {
+            mouse.current = null;
+            drawRef.current();
+          }
+        }}
+        onDoubleClick={reset}
+        onKeyDown={onKeyDown}
+      />
+      <div className="absolute right-[84px] top-1.5 flex items-center gap-1 text-xs">
+        {scrolled && (
+          <button onClick={() => commit(0, view.current.count)} className="rounded bg-[#26d07c] px-2 py-0.5 font-bold text-[#0b0e14]">
+            Live ▸
+          </button>
+        )}
+        <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1.25)} className={btn}>
+          −
+        </button>
+        <button aria-label="Zoom in" title="Zoom in" onClick={() => zoomBy(0.8)} className={btn}>
+          +
+        </button>
+        {(zoomed || scrolled) && (
+          <button aria-label="Reset view" title="Reset zoom and jump to the latest candle" onClick={reset} className={btn}>
+            Reset
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 

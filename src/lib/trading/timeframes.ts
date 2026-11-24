@@ -10,6 +10,9 @@ export interface Timeframe {
   ms: number;
 }
 
+/** Most candles kept per symbol+timeframe (scrolled-back history plus live candles). */
+export const MAX_CANDLES = 10_000;
+
 export const SEC = 1000;
 export const MIN = 60 * SEC;
 export const HOUR = 60 * MIN;
@@ -59,7 +62,7 @@ export function aggregateByTime(candles: Candle[], ms: number): Candle[] {
  * the in-progress candle repeatedly, so high/low only ever widen and the close tracks the latest.
  * Updates older than the newest bucket are ignored. The list is trimmed to `max` candles.
  */
-export function foldCandle(list: Candle[], ms: number, k: Candle, max = 600): void {
+export function foldCandle(list: Candle[], ms: number, k: Candle, max = MAX_CANDLES): void {
   const bt = bucketStart(k.t, ms);
   const last = list[list.length - 1];
   if (last && last.t === bt) {
@@ -70,6 +73,22 @@ export function foldCandle(list: Candle[], ms: number, k: Candle, max = 600): vo
     list.push({ t: bt, o: k.o, h: k.h, l: k.l, c: k.c });
     if (list.length > max) list.shift();
   }
+}
+
+/**
+ * Replace the newest part of `existing` with `fresh` (a just-fetched latest window), keeping any
+ * older history we already hold. Used to resync after a reconnect without losing scrolled-back data.
+ */
+export function mergeLatest(existing: Candle[], fresh: Candle[], max = MAX_CANDLES): Candle[] {
+  if (fresh.length === 0) return existing;
+  const out = existing.filter((c) => c.t < fresh[0].t).concat(fresh);
+  return out.length > max ? out.slice(out.length - max) : out;
+}
+
+/** `older` candles (any order) strictly before the first of `existing`, oldest first, ready to prepend. */
+export function olderThan(existing: Candle[], older: Candle[]): Candle[] {
+  const first = existing.length ? existing[0].t : Infinity;
+  return older.filter((c) => c.t < first).sort((a, b) => a.t - b.t);
 }
 
 const p2 = (n: number) => String(n).padStart(2, "0");

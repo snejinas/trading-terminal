@@ -4,7 +4,7 @@
  * geo-restricted the way api.binance.com can be.
  */
 import { ImpactBook, registerInstruments, type BookDepth, type Candle, type Feed, type Instrument, type Side } from "./engine";
-import { BINANCE_TIMEFRAMES, foldCandle } from "./timeframes";
+import { BINANCE_TIMEFRAMES, MAX_CANDLES, foldCandle, mergeLatest, olderThan } from "./timeframes";
 
 const REST = "https://data-api.binance.vision/api/v3";
 const WS = "wss://data-stream.binance.vision/stream";
@@ -29,6 +29,8 @@ export class BinanceMarket implements Feed {
   /** Higher-timeframe candles, keyed `${sym}|${timeframeId}`. 1m lives in `candles`. */
   private tf: Record<string, Candle[]> = {};
   private pending = new Map<string, Promise<void>>();
+  private olderPending = new Map<string, Promise<{ added: number; done: boolean }>>();
+  private exhausted = new Set<string>(); // series with no more history to fetch
   private everOpened = false;
   private books: Record<string, BookDepth> = {};
   private impact = new ImpactBook();
@@ -104,7 +106,7 @@ export class BinanceMarket implements Feed {
         if (last && last.t === c.t) list[list.length - 1] = c;
         else {
           list.push(c);
-          if (list.length > 400) list.shift();
+          if (list.length > MAX_CANDLES) list.shift();
         }
         this.price[s] = c.c;
         // keep every loaded higher timeframe live by folding the 1m update into it
@@ -146,19 +148,66 @@ export class BinanceMarket implements Feed {
     await p;
   }
 
-  private async fetchKlines(sym: string, timeframeId: string): Promise<Candle[]> {
-    const rows = (await fetchJson(`${REST}/klines?symbol=${sym}&interval=${timeframeId}&limit=300`)) as (string | number)[][];
+  private async fetchKlines(sym: string, timeframeId: string, limit = 300, endTime?: number): Promise<Candle[]> {
+    const end = endTime === undefined ? "" : `&endTime=${endTime}`;
+    const rows = (await fetchJson(
+      `${REST}/klines?symbol=${sym}&interval=${timeframeId}&limit=${limit}${end}`
+    )) as (string | number)[][];
     return rows.map(toCandle);
   }
 
+  private setSeries(sym: string, timeframeId: string, list: Candle[]): void {
+    if (timeframeId === "1m") this.candles[sym] = list;
+    else this.tf[`${sym}|${timeframeId}`] = list;
+  }
+
+  /** Fetch a page of history older than what we hold and prepend it (concurrent calls share a request). */
+  loadOlder(sym: string, timeframeId: string): Promise<{ added: number; done: boolean }> {
+    if (!this.timeframes.some((t) => t.id === timeframeId)) return Promise.reject(new Error(`Unknown timeframe ${timeframeId}`));
+    const key = `${sym}|${timeframeId}`;
+    if (this.exhausted.has(key)) return Promise.resolve({ added: 0, done: true });
+    let p = this.olderPending.get(key);
+    if (!p) {
+      p = this.fetchOlder(sym, timeframeId, key).finally(() => this.olderPending.delete(key));
+      this.olderPending.set(key, p);
+    }
+    return p;
+  }
+
+  private async fetchOlder(sym: string, timeframeId: string, key: string): Promise<{ added: number; done: boolean }> {
+    const PAGE = 500;
+    const held = this.candlesFor(sym, timeframeId);
+    if (held.length === 0) return { added: 0, done: false }; // not loaded yet; nothing to extend
+    if (held.length >= MAX_CANDLES) {
+      this.exhausted.add(key);
+      return { added: 0, done: true };
+    }
+    const rows = await this.fetchKlines(sym, timeframeId, PAGE, held[0].t - 1);
+    // re-read after the await: live updates may have changed the series while we were fetching
+    const cur = this.candlesFor(sym, timeframeId);
+    const add = olderThan(cur, rows);
+    if (add.length) this.setSeries(sym, timeframeId, add.concat(cur));
+    const done = rows.length < PAGE || add.length === 0; // a short page means we reached the start
+    if (done) this.exhausted.add(key);
+    return { added: add.length, done };
+  }
+
+  /** After a reconnect, re-sync the newest candles of every series we hold, keeping older history. */
   private async refreshLoaded(): Promise<void> {
-    await Promise.all(
-      Object.keys(this.tf).map(async (key) => {
+    const series = [
+      ...this.instruments.map((i) => ({ sym: i.sym, id: "1m", limit: 200 })),
+      ...Object.keys(this.tf).map((key) => {
         const [sym, id] = key.split("|");
+        return { sym, id, limit: 300 };
+      }),
+    ];
+    await Promise.all(
+      series.map(async ({ sym, id, limit }) => {
         try {
-          this.tf[key] = await this.fetchKlines(sym, id);
+          const fresh = await this.fetchKlines(sym, id, limit);
+          this.setSeries(sym, id, mergeLatest(this.candlesFor(sym, id), fresh));
         } catch {
-          /* keep the stale candles; the 1m stream keeps folding into them */
+          /* keep what we have; the 1m stream keeps folding into it */
         }
       })
     );

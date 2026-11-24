@@ -56,6 +56,11 @@ export interface Feed extends Quotes {
   candlesFor(sym: string, timeframeId: string): Candle[];
   /** Make sure candlesFor(sym, id) has data. Resolves immediately if already loaded; rejects on failure. */
   loadTimeframe(sym: string, timeframeId: string): Promise<void>;
+  /**
+   * Fetch candles older than the oldest one held and prepend them. `added` is how many were new;
+   * `done` means there is no more history to fetch (start of the market, or the per-series cap).
+   */
+  loadOlder(sym: string, timeframeId: string): Promise<{ added: number; done: boolean }>;
   spread(sym: string): number;
   changePct(sym: string): number;
   /** True while this symbol's visible book is still depleted by our own fills. */
@@ -205,6 +210,9 @@ export class Market implements Feed {
     return tf.ms <= TICKS_PER_CANDLE * 500 ? base : aggregateByTime(base, tf.ms);
   }
   async loadTimeframe(): Promise<void> {} // everything is derived from the base candles already in memory
+  async loadOlder(): Promise<{ added: number; done: boolean }> {
+    return { added: 0, done: true }; // the simulation only has the history it generated at startup
+  }
 
   spread(sym: string): number {
     return this.price[sym] * 0.0002;
