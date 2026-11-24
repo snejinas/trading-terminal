@@ -362,10 +362,21 @@ export class Account {
     for (const f of (r.fills as Fill[]).slice(0, 200)) {
       const ok =
         f && [f.id, f.orderId, f.qty, f.price, f.pnl, f.levels, f.slip, f.fee, f.ts].every(isNum) &&
+        f.qty > 0 && f.price > 0 && f.fee >= 0 && f.levels >= 1 &&
         isSide(f.side) && typeof f.sym === "string" && (f.role === "maker" || f.role === "taker");
       if (!ok) return null;
-      a.fills.push({ ...f });
+      // whitelist fields: never carry unknown properties from an external file into the account
+      a.fills.push({
+        id: f.id, orderId: f.orderId, sym: f.sym, side: f.side, qty: f.qty, price: f.price, pnl: f.pnl,
+        levels: f.levels, slip: f.slip, fee: f.fee, role: f.role, ts: f.ts,
+      });
     }
+    // Ids must be unique and the counters must stay ahead of every id in the file, otherwise a
+    // hand-edited backup could make the next order or fill collide with an existing one.
+    if (new Set(a.orders.map((o) => o.id)).size !== a.orders.length) return null;
+    if (new Set(a.fills.map((f) => f.id)).size !== a.fills.length) return null;
+    a.nextOrder = Math.max(a.nextOrder, ...a.orders.map((o) => o.id + 1), ...a.fills.map((f) => f.orderId + 1));
+    a.nextFill = Math.max(a.nextFill, ...a.fills.map((f) => f.id + 1));
     return { account: a, dropped };
   }
 

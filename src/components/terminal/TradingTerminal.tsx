@@ -13,6 +13,14 @@ import {
   saveFeeConfig,
   type FeeConfig,
 } from "@/lib/trading/fees";
+import {
+  MAX_BACKUP_BYTES,
+  backupFilename,
+  buildBackup,
+  parseBackup,
+  sourceName,
+  type BackupSummary,
+} from "@/lib/trading/backup";
 import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
   Account,
@@ -33,6 +41,11 @@ const UP = "#26d07c";
 const DOWN = "#ff5b6e";
 
 type Tab = "positions" | "orders" | "fills";
+
+type ImportDlg =
+  | { kind: "confirm"; account: Account; dropped: number; summary: BackupSummary }
+  | { kind: "error"; message: string }
+  | null;
 
 function describeFill(f: Fill): string {
   const dp = dpFor(f.sym);
@@ -326,6 +339,86 @@ export default function TradingTerminal() {
     };
   }, [feeOpen]);
 
+  // ── Backup: export the paper account to a JSON file, or import one (with confirmation) ──
+  const [backupOpen, setBackupOpen] = useState(false);
+  const backupBox = useRef<HTMLDivElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [importDlg, setImportDlg] = useState<ImportDlg>(null);
+
+  const exportBackup = useCallback(() => {
+    const a = account.current;
+    const src = sourceRef.current;
+    if (!a || !src) return;
+    try {
+      const now = new Date();
+      const name = backupFilename(src, now);
+      const blob = new Blob([JSON.stringify(buildBackup(src, a, now), null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      say(`Exported paper account to ${name} (${a.fills.length} fills, ${Object.keys(a.positions).length} positions, ${a.orders.length} working orders).`);
+    } catch (e) {
+      say(`Export failed: ${(e as Error).message}`, true);
+    }
+  }, [say]);
+
+  const onImportFile = useCallback(async (file: File | undefined) => {
+    const src = sourceRef.current;
+    const mk = market.current;
+    if (!file || !src || !mk) return;
+    if (file.size > MAX_BACKUP_BYTES) return setImportDlg({ kind: "error", message: "That file is too large to be a paper-account backup." });
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      return setImportDlg({ kind: "error", message: "Couldn't read that file." });
+    }
+    const res = parseBackup(text, src, new Set(mk.instruments.map((i) => i.sym)));
+    setImportDlg(
+      res.ok
+        ? { kind: "confirm", account: res.account, dropped: res.dropped, summary: res.summary }
+        : { kind: "error", message: res.error }
+    );
+  }, []);
+
+  const applyImport = useCallback(() => {
+    if (!importDlg || importDlg.kind !== "confirm") return;
+    const { account: next, summary: s, dropped } = importDlg;
+    account.current = withRates(next);
+    lastSaved.current = ""; // force a write even if the signature happens to match
+    persist();
+    say(`Imported backup: ${s.fills} fills, ${s.positions} positions, ${s.orders} working orders, cash $${fmt(s.cash)}.`);
+    if (dropped) say(`${dropped} position/order(s) in the backup were for symbols not in this feed and were dropped.`, true);
+    setImportDlg(null);
+    setTick((t) => t + 1);
+  }, [importDlg, withRates, persist, say]);
+
+  useEffect(() => {
+    if (!backupOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (backupBox.current && !backupBox.current.contains(e.target as Node)) setBackupOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setBackupOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [backupOpen]);
+
+  useEffect(() => {
+    if (!importDlg) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setImportDlg(null);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [importDlg]);
+
   // Flush on tab close, and pick up changes made in another tab.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
@@ -477,6 +570,8 @@ export default function TradingTerminal() {
       return say("Account reset to $" + fmt(START_CASH, 0));
     }
     if (cmdName === "clear") return setLog([]);
+    if (cmdName === "export") return exportBackup();
+    if (cmdName === "import") return fileInput.current?.click();
     if (cmdName === "help") {
       return [
         "buy|sell SYM QTY [LIMIT]   e.g. buy BTCUSDT 0.01   |  sell ETHUSDT 1 2600",
@@ -484,6 +579,7 @@ export default function TradingTerminal() {
         "cancel ID | cancel all     cancel working orders",
         "chart SYM                  switch chart/ticket symbol",
         "pause | resume | reset | clear",
+        "export | import            back up / restore the paper account as a JSON file",
       ].forEach((l) => say(l));
     }
     say(`Unknown command: ${cmdName}. Type help.`, true);
@@ -532,7 +628,10 @@ export default function TradingTerminal() {
         <div className="ml-auto flex items-center gap-2">
           <div ref={feeBox} className="relative">
             <button
-              onClick={() => setFeeOpen((o) => !o)}
+              onClick={() => {
+                setFeeOpen((o) => !o);
+                setBackupOpen(false);
+              }}
               aria-expanded={feeOpen}
               aria-haspopup="dialog"
               className="rounded border border-white/15 px-2 py-1 text-xs hover:bg-white/5"
@@ -603,6 +702,58 @@ export default function TradingTerminal() {
               </div>
             )}
           </div>
+          <div ref={backupBox} className="relative">
+            <button
+              onClick={() => {
+                setBackupOpen((o) => !o);
+                setFeeOpen(false);
+              }}
+              aria-expanded={backupOpen}
+              aria-haspopup="menu"
+              className="rounded border border-white/15 px-2 py-1 text-xs hover:bg-white/5"
+            >
+              Backup
+            </button>
+            {backupOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full z-30 mt-1 w-56 overflow-hidden rounded border border-white/15 bg-[#10141c] py-1 text-xs shadow-xl"
+              >
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setBackupOpen(false);
+                    exportBackup();
+                  }}
+                  className="block w-full px-3 py-2 text-left hover:bg-white/5"
+                >
+                  Export account (.json)
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setBackupOpen(false);
+                    fileInput.current?.click();
+                  }}
+                  className="block w-full px-3 py-2 text-left hover:bg-white/5"
+                >
+                  Import account…
+                </button>
+              </div>
+            )}
+            <input
+              ref={fileInput}
+              type="file"
+              accept="application/json,.json"
+              aria-label="Import paper account file"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = ""; // let the same file be chosen again later
+                void onImportFile(f);
+              }}
+            />
+          </div>
           <button
             onClick={() => setPaused((p) => !p)}
             className="rounded border border-white/15 px-2 py-1 text-xs hover:bg-white/5"
@@ -611,6 +762,101 @@ export default function TradingTerminal() {
           </button>
         </div>
       </header>
+
+      {importDlg && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onMouseDown={(e) => e.target === e.currentTarget && setImportDlg(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={importDlg.kind === "confirm" ? "Import paper account" : "Import failed"}
+            className="w-full max-w-md space-y-3 rounded border border-white/15 bg-[#10141c] p-4 text-xs shadow-2xl"
+          >
+            {importDlg.kind === "error" ? (
+              <>
+                <h2 className="text-sm font-bold text-[#ff5b6e]">Couldn&apos;t import</h2>
+                <p className="text-slate-300">{importDlg.message}</p>
+                <div className="flex justify-end">
+                  <button
+                    autoFocus
+                    onClick={() => setImportDlg(null)}
+                    className="rounded border border-white/20 px-3 py-1.5 hover:bg-white/5"
+                  >
+                    Close
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="text-sm font-bold">Replace your paper account?</h2>
+                <p className="text-slate-400">
+                  Backup from{" "}
+                  <span className="text-slate-200">
+                    {Number.isNaN(Date.parse(importDlg.summary.exportedAt))
+                      ? "an unknown date"
+                      : new Date(importDlg.summary.exportedAt).toLocaleString()}
+                  </span>{" "}
+                  ({sourceName(importDlg.summary.source)} feed).
+                </p>
+                <table className="w-full">
+                  <thead className="text-slate-500">
+                    <tr>
+                      <th className="py-1 text-left font-normal"></th>
+                      <th className="py-1 text-right font-normal">Current</th>
+                      <th className="py-1 text-right font-normal">Backup</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(
+                      [
+                        ["Equity", `$${fmt(a.equity(m))}`, `$${fmt(importDlg.account.equity(m))}`],
+                        ["Cash", `$${fmt(a.cash)}`, `$${fmt(importDlg.summary.cash)}`],
+                        ["Positions", String(Object.keys(a.positions).length), String(importDlg.summary.positions)],
+                        ["Working orders", String(a.orders.length), String(importDlg.summary.orders)],
+                        ["Fills", String(a.fills.length), String(importDlg.summary.fills)],
+                        ["Realized (net)", sign(a.realized), sign(importDlg.summary.realized)],
+                        ["Fees paid", `$${fmt(a.fees)}`, `$${fmt(importDlg.summary.fees)}`],
+                      ] as [string, string, string][]
+                    ).map(([k, cur, bak]) => (
+                      <tr key={k} className="border-t border-white/5">
+                        <td className="py-1 text-slate-400">{k}</td>
+                        <td className="py-1 text-right">{cur}</td>
+                        <td className="py-1 text-right text-slate-100">{bak}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {importDlg.dropped > 0 && (
+                  <p className="text-amber-300">
+                    {importDlg.dropped} position/order(s) in the file use symbols this feed doesn&apos;t have and will be dropped.
+                  </p>
+                )}
+                <p className="text-slate-500">This replaces your current account and can&apos;t be undone. Equity is at current prices.</p>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button onClick={exportBackup} className="mr-auto text-slate-400 underline hover:text-slate-200">
+                    Back up current first
+                  </button>
+                  <button
+                    autoFocus
+                    onClick={() => setImportDlg(null)}
+                    className="rounded border border-white/20 px-3 py-1.5 hover:bg-white/5"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={applyImport}
+                    className="rounded bg-[#ff5b6e] px-3 py-1.5 font-bold text-[#0b0e14] hover:opacity-90"
+                  >
+                    Replace account
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid flex-1 grid-cols-1 gap-px bg-white/10 lg:min-h-0 lg:grid-cols-[220px_minmax(0,1fr)_280px]">
         {/* Watchlist */}
