@@ -21,6 +21,7 @@ import {
   sourceName,
   type BackupSummary,
 } from "@/lib/trading/backup";
+import { SLIPPAGE_SEVERE_BPS, estimateSlippage, slippageLine } from "@/lib/trading/slippage";
 import { loadAccount, parseAccount, saveAccount, storageKey, type SourceKey } from "@/lib/trading/storage";
 import {
   Account,
@@ -49,7 +50,10 @@ type ImportDlg =
 
 function describeFill(f: Fill): string {
   const dp = dpFor(f.sym);
-  const walked = f.levels > 1 ? ` across ${f.levels} levels (slippage ${fmt(f.slip, dp)})` : "";
+  // same basis as the ticket estimate: slippage relative to the best price at execution
+  const best = f.side === "BUY" ? f.price - f.slip : f.price + f.slip;
+  const bps = best > 0 ? (f.slip / best) * 1e4 : 0;
+  const walked = f.levels > 1 ? ` across ${f.levels} levels (slippage ${fmt(f.slip, dp)} · ${bps.toFixed(1)} bps)` : "";
   return `${f.side} ${fmtQty(f.qty)} ${f.sym} @ ${fmt(f.price, dp)} avg${walked}, fee ${fmt(f.fee, 4)} (${f.role})`;
 }
 
@@ -281,6 +285,18 @@ export default function TradingTerminal() {
   const [qty, setQty] = useState("10");
   const [limit, setLimit] = useState("");
   const [tab, setTab] = useState<Tab>("positions");
+  // Orders with severe estimated slippage need a second click. `armed` holds the exact order
+  // parameters that were armed, so editing anything disarms it; it also expires on its own.
+  const [armed, setArmed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(null), 6000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  // Changing anything about the order disarms it, even if you later change it back.
+  useEffect(() => {
+    setArmed(null);
+  }, [sym, side, type, qty, limit]);
   const [log, setLog] = useState<{ t: number; msg: string; err?: boolean }[]>([]);
   const [cmd, setCmd] = useState("");
   const [paused, setPaused] = useState(false);
@@ -532,14 +548,24 @@ export default function TradingTerminal() {
     const known = (s?: string) => (s && mk.price[s.toUpperCase()] ? s.toUpperCase() : null);
 
     if (cmdName === "buy" || cmdName === "sell") {
-      const s = known(args[0]);
-      const q = parseFloat(args[1]);
-      if (!s) return say(`Usage: ${cmdName} SYMBOL QTY [LIMIT]  (symbols: ${mk.instruments.map((i) => i.sym).join(", ")})`, true);
+      // a trailing "!" (or "force") confirms an order flagged for high slippage
+      const rest = [...args];
+      const force = rest.length > 1 && /^(!|force)$/i.test(rest[rest.length - 1]);
+      if (force) rest.pop();
+      const s = known(rest[0]);
+      const q = parseFloat(rest[1]);
+      if (!s) return say(`Usage: ${cmdName} SYMBOL QTY [LIMIT] [!]  (symbols: ${mk.instruments.map((i) => i.sym).join(", ")})`, true);
       if (!(q > 0)) return say("Quantity must be a positive number", true);
-      const lim = args[2] ? parseFloat(args[2].replace("@", "")) : undefined;
-      if (args[2] && !(lim! > 0)) return say("Limit price must be a positive number", true);
+      const lim = rest[2] ? parseFloat(rest[2].replace("@", "")) : undefined;
+      if (rest[2] && !(lim! > 0)) return say("Limit price must be a positive number", true);
       setSym(s);
-      return place(s, cmdName === "buy" ? "BUY" : "SELL", lim ? "LMT" : "MKT", q, lim);
+      const sd: Side = cmdName === "buy" ? "BUY" : "SELL";
+      const pre = estimateSlippage(mk, s, sd, q, lim);
+      if (pre && pre.severity === "severe" && !force) {
+        say(`Not sent. High price impact: ${slippageLine(pre)}.`, true);
+        return say(`Re-send with "!" to confirm: ${cmdName} ${s} ${q}${lim ? " " + lim : ""} !`, true);
+      }
+      return place(s, sd, lim ? "LMT" : "MKT", q, lim);
     }
     if (cmdName === "flat" || cmdName === "close") {
       const s = known(args[0]);
@@ -574,7 +600,7 @@ export default function TradingTerminal() {
     if (cmdName === "import") return fileInput.current?.click();
     if (cmdName === "help") {
       return [
-        "buy|sell SYM QTY [LIMIT]   e.g. buy BTCUSDT 0.01   |  sell ETHUSDT 1 2600",
+        "buy|sell SYM QTY [LIMIT] [!]   e.g. buy BTCUSDT 0.01   |  sell ETHUSDT 1 2600   (! confirms high slippage)",
         "flat SYM                   close the whole position at market",
         "cancel ID | cancel all     cancel working orders",
         "chart SYM                  switch chart/ticket symbol",
@@ -607,7 +633,24 @@ export default function TradingTerminal() {
   const estNotional = est ? est.cost + (type === "LMT" ? (qNum - est.qty) * limNum : 0) : 0;
   // marketable part pays taker; any remainder would rest and pay maker
   const estFee = est ? est.cost * a.rates.taker + (estNotional - est.cost) * a.rates.maker : 0;
-  const estShort = est ? qNum - est.qty > 1e-9 : false;
+  const slip =
+    qNum > 0 && !(type === "LMT" && !(limNum > 0))
+      ? estimateSlippage(m, sym, side, qNum, type === "LMT" ? limNum : undefined)
+      : null;
+  const orderKey = `${sym}|${side}|${type}|${qty}|${type === "LMT" ? limit : ""}`;
+  const isArmed = armed === orderKey;
+  const needsConfirm = slip?.severity === "severe";
+  const isBlocked = slip?.severity === "blocked" && type === "MKT";
+  const slipTone =
+    slip?.severity === "severe" || slip?.severity === "blocked"
+      ? "border-[#ff5b6e]/50 bg-[#ff5b6e]/10 text-[#ff8a98]"
+      : "border-amber-400/40 bg-amber-400/10 text-amber-300";
+  const slipTitle =
+    slip?.severity === "blocked"
+      ? "Not enough visible liquidity"
+      : slip?.severity === "severe"
+        ? "High price impact"
+        : "Noticeable price impact";
 
   return (
     <div className="flex min-h-screen flex-col bg-[#0b0e14] font-mono text-sm text-slate-200 lg:h-screen lg:overflow-hidden">
@@ -1085,20 +1128,62 @@ export default function TradingTerminal() {
                 <span className="text-slate-200">{fmt(est.avg, dp)}</span>
               </div>
             )}
-            {estShort && !(type === "LMT" && est!.qty === 0) && (
-              <div className="text-[11px] text-amber-300">
-                {type === "MKT"
-                  ? `Only ${fmtQty(est!.qty)} available in the visible book — a market order this size will be rejected.`
-                  : `Only ${fmtQty(est!.qty)} is marketable now; the rest would rest as a limit order.`}
+            {slip && slip.hasDepth && slip.filled > 0 && (
+              <div className="flex justify-between text-xs text-slate-400">
+                <span>Est. slippage</span>
+                <span
+                  className={
+                    slip.severity === "severe"
+                      ? "text-[#ff5b6e]"
+                      : slip.severity === "warn"
+                        ? "text-amber-300"
+                        : "text-slate-200"
+                  }
+                >
+                  {slip.slipBps.toFixed(1)} bps · ${fmt(slip.slipCost, 2)}
+                </span>
               </div>
             )}
+            {slip && (slip.severity === "warn" || slip.severity === "severe" || slip.severity === "blocked") && (
+              <div role="alert" className={`rounded border px-2 py-1.5 text-[11px] leading-snug ${slipTone}`}>
+                <div className="font-semibold">{slipTitle}</div>
+                <ul className="mt-0.5 list-disc space-y-0.5 pl-4">
+                  {slip.reasons.map((r) => (
+                    <li key={r}>{r}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {slip && slip.notes.length > 0 && (
+              <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-slate-500">
+                {slip.notes.map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            )}
             <button
-              onClick={() => place(sym, side, type, parseFloat(qty), type === "LMT" ? parseFloat(limit) : undefined)}
-              className="w-full rounded py-2.5 font-bold text-[#0b0e14]"
-              style={{ background: side === "BUY" ? UP : DOWN }}
+              disabled={isBlocked}
+              onClick={() => {
+                if (needsConfirm && !isArmed) return setArmed(orderKey);
+                setArmed(null);
+                place(sym, side, type, parseFloat(qty), type === "LMT" ? parseFloat(limit) : undefined);
+              }}
+              className="w-full rounded py-2.5 font-bold text-[#0b0e14] disabled:cursor-not-allowed disabled:opacity-40"
+              style={{ background: isArmed ? "#f5a524" : side === "BUY" ? UP : DOWN }}
             >
-              {side} {qty || "0"} {sym}
+              {isBlocked
+                ? "Not enough liquidity"
+                : isArmed
+                  ? `Confirm ${side} ${qty} ${sym} · ~${slip!.slipBps.toFixed(0)} bps`
+                  : `${side} ${qty || "0"} ${sym}${needsConfirm ? " ⚠" : ""}`}
             </button>
+            {needsConfirm && (
+              <div aria-live="polite" className="text-center text-[10px] text-slate-500">
+                {isArmed
+                  ? "Click again within 6s to send, or change the order to cancel."
+                  : `Estimated impact is over ${SLIPPAGE_SEVERE_BPS} bps or the order takes most of the book. You'll be asked to confirm.`}
+              </div>
+            )}
           </div>
           <Panel
             title={
