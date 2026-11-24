@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# a newer push to the same branch/PR supersedes the run in progress
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Type-check and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type-check the app
+        run: npm run typecheck
+
+      - name: Type-check the browser tests
+        run: npm run typecheck:e2e
+
+      - name: Unit tests
+        run: npm test
+
+  e2e:
+    name: Browser tests (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Chromium plus the system libraries it needs. The version comes from the pinned @playwright/test.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # `npm run e2e` builds the app and starts it itself (CI=true forces a fresh server, 2 workers, 1 retry).
+      # Binance is mocked in every test, so the job needs no network access beyond installing dependencies.
+      - name: Browser tests
+        run: npm run e2e
+
+      - name: Upload the Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7

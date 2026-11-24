@@ -1,5 +1,7 @@
 # Trading Terminal (paper)
 
+[![CI](https://github.com/snejinas/trading-terminal/actions/workflows/ci.yml/badge.svg)](https://github.com/snejinas/trading-terminal/actions/workflows/ci.yml)
+
 A browser trading terminal with **live Binance market data** and a **local paper-trading account**.
 Orders are simulated in your browser; nothing is ever sent to an exchange and no API key is used.
 
@@ -81,6 +83,12 @@ its order book is flat and every minute trades the same volume, which lets the t
 | `account-backup` | export, import with confirmation, rejection of bad files |
 
 `npm run e2e -- e2e/order-ticket.spec.ts` runs one file; `npm run typecheck:e2e` type-checks the tests.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push to `main` and on pull requests: one job type-checks the app and
+the tests and runs the unit tests, the other installs Chromium and runs `npm run e2e` (the HTML report is
+uploaded as an artifact, kept for 7 days). Both use Node 22 and `npm ci`.
 Set `E2E_PORT` to use another port. In CI the server is always started fresh; locally an already
 running one on that port is reused.
 
