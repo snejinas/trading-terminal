@@ -203,11 +203,11 @@ test.describe("Stochastic RSI on a repeating +2 / -1 / -1 price pattern", () => 
     await button(page).click();
     await show(page).check();
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Volume" }).click();
+    await page.getByRole("button", { name: "Volume", exact: true }).click();
     await expect.poll(async () => (await chartState(page)).vol).toBe("0");
     const noVol = await paneHeights(page);
     expect(noVol.osch).toBeGreaterThan(0);
-    await page.getByRole("button", { name: "Volume" }).click();
+    await page.getByRole("button", { name: "Volume", exact: true }).click();
     await expect.poll(async () => (await paneHeights(page)).volh).toBeGreaterThan(0);
     expect((await paneHeights(page)).priceh).toBeLessThan(noVol.priceh);
   });

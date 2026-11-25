@@ -233,3 +233,23 @@ export const heatPixels = (page: Page): Promise<number> =>
     for (let i = 0; i < d.length; i += 4) if (d[i + 2] > 60 && d[i + 2] > d[i] + 30 && d[i + 2] >= d[i + 1] - 5) n++;
     return n;
   });
+
+export interface VpState {
+  rows: number;
+  lo: number;
+  hi: number;
+  total: number;
+  first: number;
+  last: number;
+  bins: number[];
+  poc: { row: number; price: number; volume: number } | null;
+  va: { percent: number; vahRow: number; valRow: number; vah: number; val: number; volume: number } | null;
+  hover: { row: number; price: number; volume: number } | null;
+}
+
+/** The volume profile's model state (null while it is off). */
+export const chartVp = (page: Page): Promise<VpState | null> =>
+  chartCanvas(page).evaluate((c) => {
+    const s = (c as HTMLCanvasElement).dataset.vp;
+    return s ? JSON.parse(s) : null;
+  });

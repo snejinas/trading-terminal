@@ -3,7 +3,7 @@ import { expect, test } from "./support/test";
 import { blockBinance, installMockBinance } from "./support/mockBinance";
 import { chartCanvas, chartState, clickTimeframe, openTerminal, reloadTerminal } from "./support/terminal";
 
-const volumeButton = (page: Page) => page.getByRole("button", { name: "Volume" });
+const volumeButton = (page: Page) => page.getByRole("button", { name: "Volume", exact: true });
 const maxVolume = (page: Page) => expect.poll(async () => (await chartState(page)).maxv);
 
 /**

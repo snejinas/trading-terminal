@@ -33,6 +33,11 @@ Other scripts: `npm run typecheck`, `npm test`.
   **Stochastic RSI** (`StochRSI` button, off by default): where Wilder's RSI sits between its own lowest and highest value
   over a lookback, with %K and %D smoothing; defaults 14, 14, 3, 3. It has its own pane between the price chart and
   the volume bars, fixed 0–100 scale with the 20/80 levels, values in the pane label and the crosshair axis.
+  **Volume profile** (`VP` button, off by default): traded volume by price level over the candles in view, as bars
+  growing leftwards from the price axis behind the candles. Each candle's volume is spread evenly over its
+  high–low range. Marks the point of control (busiest level, `POC`) and the value area (`VAH`/`VAL`, default 70%
+  of the volume around it); levels (10–200) and value-area percentage (50–95) are settings, remembered. It always
+  describes what is on screen, so it changes as you scroll and zoom.
   **Fibonacci retracement** (`Fib` button): choose *Draw retracement*, then click the start and the end of a move
   (Esc cancels). Levels 0, 0.236, 0.382, 0.5, 0.618, 0.786 and 1 are drawn from the earlier point to the right edge,
   with optional extensions (1.272, 1.618, 2.618). Anchors are snapped to candles and stored as time + price, so they
@@ -65,6 +70,7 @@ src/lib/trading/
   timeframes.ts                     timeframes, candle aggregation/folding, time formatting
   chartview.ts                      chart zoom/scroll math
   indicators.ts                     SMA/EMA, Bollinger Bands, Stochastic RSI (and the RSI it is built on) and their settings
+  volumeprofile.ts                  visible-range volume profile: levels, point of control, value area
   fib.ts                            Fibonacci levels, time/price anchors, hit-testing, per-symbol storage
   liquidations.ts                   estimated liquidation heatmap model (position inflow, levels, consumption, grid)
   slippage.ts                       pre-trade slippage analysis
@@ -78,7 +84,7 @@ e2e/                                Playwright browser tests + the mocked Binanc
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic RSI (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+timeframes, the volume profile, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic RSI (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
 
 ### Browser tests (Playwright)
@@ -96,6 +102,7 @@ its order book is flat and every minute trades the same volume, which lets the t
 | --- | --- |
 | `chart-interaction` | wheel/drag/pinch/keyboard zoom and scroll, older-history paging, staying anchored to live candles |
 | `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
+| `chart-volumeprofile` | every level against an independent calculation, POC and value area, settings, scroll/zoom, hover, no-volume feeds |
 | `chart-liquidation` | heatmap from volume and from open interest, exact levels and consumption times, fallback, fetch frequency |
 | `chart-fibonacci` | placing with two clicks, exact levels, anchoring through zoom/timeframes, dragging, persistence per symbol, limits |
 | `chart-stochrsi` | exact %K/%D against an independent calculation, pane layout with volume, the four inputs, persistence, popovers |

@@ -11,6 +11,20 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  VP_MAX_ROWS,
+  VP_MAX_VA,
+  VP_MAX_WIDTH,
+  VP_MIN_ROWS,
+  VP_MIN_VA,
+  loadVpConfig,
+  profileStats,
+  saveVpConfig,
+  volumeProfile,
+  type Profile,
+  type ProfileStats,
+  type VpConfig,
+} from "@/lib/trading/volumeprofile";
+import {
   buildGrid,
   buildSegments,
   heatColor,
@@ -242,7 +256,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const volOn = useRef(volShown);
   const [maCfg, setMaCfg] = useState<MaSlot[]>(loadMaConfig); // moving averages (remembered)
   const maRef = useRef(maCfg);
-  const [panel, setPanel] = useState<"ma" | "bb" | "stochrsi" | "fib" | null>(null); // which indicator popover is open
+  const [panel, setPanel] = useState<"ma" | "bb" | "stochrsi" | "vp" | "fib" | null>(null); // which indicator popover is open
   const [bbCfg, setBbCfg] = useState<BbConfig>(loadBbConfig); // Bollinger Bands (remembered)
   const bbRef = useRef(bbCfg);
   const bbCache = useRef<{ key: string; bands: Bands } | null>(null);
@@ -263,6 +277,9 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const [liqShown, setLiqShown] = useState(loadLiqPref);
   const liqOn = useRef(liqShown);
   const liqCache = useRef<{ key: string; mode: LiqMode; segments: Segment[]; top: Segment[] } | null>(null);
+  const [vpCfg, setVpCfg] = useState<VpConfig>(loadVpConfig); // volume profile (remembered)
+  const vpRef = useRef(vpCfg);
+  const vpCache = useRef<{ key: string; prof: Profile; stats: ProfileStats | null } | null>(null);
   const srCache = useRef<{ key: string; k: (number | null)[]; d: (number | null)[] } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
   const controls = useRef<HTMLDivElement>(null);
@@ -506,6 +523,80 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
         ctx.fillStyle = `rgb(${lr},${lg},${lb})`;
         ctx.fillRect(gx + i, priceBottom - 17, 1, 10);
       }
+    }
+
+    // volume profile (visible range): bars grow leftwards from the price axis, behind the candles
+    cv.dataset.vp = "";
+    if (vpRef.current.enabled) {
+      const vc = vpRef.current;
+      const lastV = all[all.length - 1];
+      const vKey = `${sym}|${tf}|${first}|${first + data.length}|${all.length}|${lastV.c}|${lastV.h}|${lastV.l}|${lastV.v ?? ""}|${lo}|${hi}|${vc.rows}|${vc.va}`;
+      if (vpCache.current?.key !== vKey) {
+        const prof = volumeProfile(data, lo, hi, vc.rows);
+        vpCache.current = { key: vKey, prof, stats: profileStats(prof, vc.va / 100) };
+      }
+      const { prof, stats } = vpCache.current;
+      const rowH = (priceBottom - pad) / prof.rows;
+      let hoverVp: { row: number; price: number; volume: number } | null = null;
+      const vm = mouse.current;
+      if (vm && vm.x < plotW && vm.y > pad && vm.y < priceBottom) {
+        const hr = Math.min(prof.rows - 1, Math.floor((vm.y - pad) / rowH));
+        hoverVp = { row: hr, price: hi - ((hr + 0.5) / prof.rows) * (hi - lo), volume: prof.bins[hr] };
+      }
+      if (stats) {
+        let maxBin = 0;
+        for (const b of prof.bins) if (b > maxBin) maxBin = b;
+        const maxW = plotW * VP_MAX_WIDTH;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, plotW, priceBottom);
+        ctx.clip();
+        for (let r = 0; r < prof.rows; r++) {
+          if (prof.bins[r] <= 0) continue;
+          const w = (prof.bins[r] / maxBin) * maxW;
+          ctx.fillStyle = r === stats.pocRow ? "rgba(248,250,252,0.55)" : r >= stats.vahRow && r <= stats.valRow ? "rgba(96,165,250,0.38)" : "rgba(148,163,184,0.22)";
+          ctx.fillRect(plotW - w, pad + r * rowH + 0.5, w, Math.max(1, rowH - 1));
+        }
+        for (const [price, label, dash, color] of [
+          [stats.pocPrice, "POC", [5, 3], "rgba(248,250,252,0.8)"],
+          [stats.vah, "VAH", [2, 3], "rgba(96,165,250,0.7)"],
+          [stats.val, "VAL", [2, 3], "rgba(96,165,250,0.7)"],
+        ] as const) {
+          const ly2 = Math.round(y(price)) + 0.5;
+          ctx.setLineDash([...dash]);
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(0, ly2);
+          ctx.lineTo(plotW, ly2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = color;
+          ctx.textAlign = "right";
+          ctx.fillText(`${label} ${fmt(price, dp)}`, plotW - maxW - 6, Math.min(priceBottom - 6, Math.max(pad + 9, ly2 - 7))); // kept inside the pane
+          ctx.textAlign = "left";
+        }
+        ctx.restore();
+      }
+      cv.dataset.vp = JSON.stringify({
+        rows: prof.rows,
+        lo: prof.lo,
+        hi: prof.hi,
+        total: prof.total,
+        first,
+        last: first + data.length - 1,
+        bins: Array.from(prof.bins),
+        poc: stats ? { row: stats.pocRow, price: stats.pocPrice, volume: stats.pocVolume } : null,
+        va: stats ? { percent: vc.va, vahRow: stats.vahRow, valRow: stats.valRow, vah: stats.vah, val: stats.val, volume: stats.vaVolume } : null,
+        hover: hoverVp,
+      });
+      const vpLabel = stats
+        ? `Volume profile · POC ${fmt(stats.pocPrice, dp)} · VA ${vc.va}% ${fmt(stats.val, dp)}–${fmt(stats.vah, dp)}${hoverVp ? ` · level ${formatVolume(hoverVp.volume)}` : ""}`
+        : "Volume profile · no volume data";
+      const labelY = priceBottom - (liqOn.current ? 38 : 20);
+      ctx.fillStyle = "rgba(11,14,20,0.7)";
+      ctx.fillRect(4, labelY, ctx.measureText(vpLabel).width + 12, 16);
+      ctx.fillStyle = "#c7cfdd";
+      ctx.fillText(vpLabel, 10, labelY + 8);
     }
 
     // candles
@@ -931,6 +1022,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     saveStochRsiConfig(next);
     drawRef.current();
   }, []);
+  const updateVp = useCallback((next: VpConfig) => {
+    vpRef.current = next;
+    setVpCfg(next);
+    saveVpConfig(next);
+    drawRef.current();
+  }, []);
   const updateBb = useCallback((next: BbConfig) => {
     bbRef.current = next;
     setBbCfg(next);
@@ -1270,6 +1367,16 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           StochRSI
         </button>
         <button
+          aria-label="Volume profile"
+          aria-pressed={vpCfg.enabled}
+          aria-expanded={panel === "vp"}
+          title="Volume profile (visible range)"
+          onClick={() => setPanel((p) => (p === "vp" ? null : "vp"))}
+          className={`${btn} ${vpCfg.enabled ? "text-white" : "text-slate-500"}`}
+        >
+          VP
+        </button>
+        <button
           aria-label="Liquidation heatmap"
           aria-pressed={liqShown}
           title={liqShown ? "Hide the estimated liquidation heatmap" : "Show an estimated liquidation heatmap"}
@@ -1346,6 +1453,17 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
               </button>
             </div>
           )}
+        </div>
+      )}
+      {panel === "vp" && (
+        <div role="dialog" aria-label="Volume profile" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
+          <label className="flex items-center gap-2 py-0.5">
+            <input type="checkbox" aria-label="Show volume profile" checked={vpCfg.enabled} onChange={(e) => updateVp({ ...vpCfg, enabled: e.target.checked })} />
+            <span className="inline-block h-2 w-3 rounded-sm" style={{ background: "rgba(96,165,250,0.6)" }} />
+            <span className="text-slate-200">Volume profile</span>
+          </label>
+          <NumField label="Volume profile rows" text="Levels" value={vpCfg.rows} min={VP_MIN_ROWS} max={VP_MAX_ROWS} integer onCommit={(v) => updateVp({ ...vpCfg, rows: v })} />
+          <NumField label="Value area percent" text="Value area %" value={vpCfg.va} min={VP_MIN_VA} max={VP_MAX_VA} integer onCommit={(v) => updateVp({ ...vpCfg, va: v })} />
         </div>
       )}
       {panel === "stochrsi" && (
