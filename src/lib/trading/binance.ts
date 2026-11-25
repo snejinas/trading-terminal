@@ -6,12 +6,15 @@
 import { ImpactBook, registerInstruments, type BookDepth, type Candle, type Feed, type Instrument, type Side } from "./engine";
 import { BINANCE_TIMEFRAMES, MAX_CANDLES, foldCandle, mergeLatest, olderThan } from "./timeframes";
 import { oiPeriod, parseOiRows, type OiPoint } from "./liquidations";
+import { addTrade, createFlowStore, type FlowStore } from "./footprint";
 
 const REST = "https://data-api.binance.vision/api/v3";
 const WS = "wss://data-stream.binance.vision/stream";
 // USD-M futures open-interest history (public, no key). May be unreachable or geo-blocked; the heatmap then uses volume.
 const FUTURES = "https://fapi.binance.com/futures/data";
 const OI_REFRESH_MS = 60_000;
+// Footprint backfill: the latest FLOW_PAGES x 1000 trades over REST, once per symbol (retried after a minute if it failed).
+const FLOW_PAGES = 3;
 
 export const BINANCE_INSTRUMENTS: Instrument[] = [
   { sym: "BTCUSDT", name: "Bitcoin", start: 0, vol: 0, dp: 2 },
@@ -72,6 +75,7 @@ export class BinanceMarket implements Feed {
         `${i.sym.toLowerCase()}@bookTicker`,
         `${i.sym.toLowerCase()}@kline_1m`,
         `${i.sym.toLowerCase()}@depth10@100ms`, // top-10 levels, full snapshot each push
+        `${i.sym.toLowerCase()}@aggTrade`, // every trade, for the order flow footprint
       ])
       .join("/");
     const ws = new WebSocket(`${WS}?streams=${streams}`);
@@ -121,6 +125,8 @@ export class BinanceMarket implements Feed {
           const tfm = this.timeframes.find((t) => t.id === key.slice(s.length + 1));
           if (tfm) foldCandle(this.tf[key], tfm.ms, c, MAX_CANDLES, dv);
         }
+      } else if (d.e === "aggTrade") {
+        addTrade(this.flowStore(d.s), { id: Number(d.a), t: Number(d.T), p: parseFloat(d.p), q: parseFloat(d.q), m: !!d.m }, "live");
       } else if (d.b !== undefined && d.a !== undefined && d.s) {
         // bookTicker: best bid / ask
         this.bids[d.s] = parseFloat(d.b);
@@ -133,6 +139,51 @@ export class BinanceMarket implements Feed {
 
   candlesFor(sym: string, timeframeId: string): Candle[] {
     return timeframeId === "1m" ? (this.candles[sym] ?? []) : (this.tf[`${sym}|${timeframeId}`] ?? []);
+  }
+
+  private flow: Record<string, FlowStore> = {};
+  private flowLoad = new Map<string, { state: "busy" | "done" | "failed"; at: number }>();
+
+  private flowStore(sym: string): FlowStore {
+    let f = this.flow[sym];
+    if (!f) {
+      const dp = this.instruments.find((i) => i.sym === sym)?.dp ?? 2;
+      f = this.flow[sym] = createFlowStore(Math.pow(10, -dp));
+    }
+    return f;
+  }
+
+  flowFor(sym: string): FlowStore | null {
+    return this.flow[sym] ?? null;
+  }
+
+  /** Backfill the latest trades (newest page first, each added newest-to-oldest so the live stream and the backfill never double count). */
+  async loadFlow(sym: string): Promise<void> {
+    const e = this.flowLoad.get(sym);
+    if (e && (e.state === "busy" || e.state === "done" || Date.now() - e.at < OI_REFRESH_MS)) return;
+    const entry: { state: "busy" | "done" | "failed"; at: number } = { state: "busy", at: Date.now() };
+    this.flowLoad.set(sym, entry);
+    const store = this.flowStore(sym);
+    let ok = false;
+    try {
+      let fromId: number | null = null;
+      for (let page = 0; page < FLOW_PAGES; page++) {
+        const url: string = `${REST}/aggTrades?symbol=${sym}&limit=1000${fromId === null ? "" : `&fromId=${fromId}`}`;
+        const rows = (await fetchJson(url)) as { a: number; p: string; q: string; T: number; m: boolean }[];
+        if (!Array.isArray(rows) || rows.length === 0) break;
+        const sorted = rows.map((r) => ({ id: Number(r.a), t: Number(r.T), p: parseFloat(r.p), q: parseFloat(r.q), m: !!r.m })).sort((a, b) => b.id - a.id);
+        for (const tr of sorted) addTrade(store, tr, "history");
+        const oldest = sorted[sorted.length - 1].id;
+        if (oldest <= 1) break;
+        fromId = Math.max(1, oldest - 1000);
+      }
+      ok = true;
+    } catch {
+      /* keep whatever was recorded */
+    } finally {
+      entry.state = ok ? "done" : "failed"; // a failure is retried after a minute
+      entry.at = Date.now();
+    }
   }
 
   private oi = new Map<string, { points: OiPoint[] | null; at: number; busy: boolean }>();

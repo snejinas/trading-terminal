@@ -253,3 +253,38 @@ export const chartVp = (page: Page): Promise<VpState | null> =>
     const s = (c as HTMLCanvasElement).dataset.vp;
     return s ? JSON.parse(s) : null;
   });
+
+export interface FpLevel {
+  k: number;
+  price: number;
+  b: number;
+  s: number;
+  bi: boolean;
+  si: boolean;
+}
+export interface FpCandle {
+  t: number;
+  buy: number;
+  sell: number;
+  delta: number;
+  pocK: number;
+  levels: FpLevel[];
+}
+export interface FpState {
+  available: boolean;
+  zoomedOut?: boolean;
+  step?: number;
+  rowPx?: number;
+  coverage?: { trades: number; firstT: number | null; lastT: number | null };
+  max?: number;
+  withData?: number;
+  candles?: FpCandle[];
+  hover?: { t: number; buy: number; sell: number; delta: number; pocK: number } | null;
+}
+
+/** The order flow footprint's model state (null while it is off). */
+export const chartFp = (page: Page): Promise<FpState | null> =>
+  chartCanvas(page).evaluate((c) => {
+    const s = (c as HTMLCanvasElement).dataset.fp;
+    return s ? JSON.parse(s) : null;
+  });

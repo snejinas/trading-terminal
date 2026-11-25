@@ -5,6 +5,7 @@
 
 import { SIM_TIMEFRAMES, aggregateByTime, type Timeframe } from "./timeframes";
 import type { OiPoint } from "./liquidations";
+import type { FlowStore } from "./footprint";
 
 export interface Instrument {
   sym: string;
@@ -70,6 +71,12 @@ export interface Feed extends Quotes {
    */
   loadOpenInterest?(sym: string, timeframeId: string): Promise<void>;
   openInterestFor?(sym: string, timeframeId: string): OiPoint[] | null;
+  /**
+   * Trade-by-trade volume split by aggressor, for the order flow footprint, if this feed has trades. `loadFlow` backfills the
+   * latest trades once (cheap to call often, never throws); `flowFor` returns what has been recorded so far.
+   */
+  loadFlow?(sym: string): Promise<void>;
+  flowFor?(sym: string): FlowStore | null;
   spread(sym: string): number;
   changePct(sym: string): number;
   /** True while this symbol's visible book is still depleted by our own fills. */

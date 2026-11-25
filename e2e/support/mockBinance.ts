@@ -32,6 +32,7 @@ export const INTERVAL_MS: Record<string, number> = {
 };
 
 const MIN = 60e3;
+import { LIVE_TRADES, REST_OVERLAP, TRADE_HISTORY, tradeAt } from "./mockTrades";
 
 export interface MockOptions {
   /** Include volume (REST column 5, stream field `v`). false simulates a feed without volume. Default true. */
@@ -53,6 +54,8 @@ export interface MockOptions {
   livePrice?: "flat" | "wave";
   /** Futures open-interest history. Omitted: the futures host is unreachable (the heatmap falls back to volume). */
   oi?: MockOiOptions;
+  /** Trade-by-trade data for the order flow footprint. Omitted: the aggTrades endpoint is unreachable and no trades stream in. */
+  trades?: MockOptionsTrades;
   /**
    * Shape of 1-minute history. "ramp": the candle k minutes from the (frozen) current minute is
    * open base+k, high base+k+1, low base+k-1, close base+k+0.5, so moving averages have closed forms
@@ -65,12 +68,22 @@ export interface MockOptions {
   history?: "wave" | "ramp" | "zigzag" | "swing";
 }
 
+export interface MockOptionsTrades {
+  /** Trades are served for BTCUSDT: history over REST (aggTrades) and a live batch on the stream (see mockTrades.ts). */
+  enabled: true;
+}
+
 export interface MockOiOptions {
   /** Open interest jumps by 100M USD (from a flat 1B) at the first 5-minute snapshot this many minutes back. */
   spikeMinutesAgo?: number;
 }
 
 export interface Mock {
+  /** aggTrades requests seen, as `SYMBOL/latest` or `SYMBOL/from<id>`. */
+  tradeRequests: string[];
+  /** Start of the (frozen) current minute, and the instant the mock treats as now. */
+  curMinute: number;
+  startedAt: number;
   /** Open-interest requests seen, as `SYMBOL/period`. */
   futures: string[];
   /** Timestamp of the 5-minute open-interest snapshot at which the jump shows up (the growth happened in the five minutes before it). */
@@ -98,7 +111,11 @@ export async function installMockBinance(context: BrowserContext, options: MockO
   const oiPeriodMs: Record<string, number> = { "5m": 5 * MIN, "15m": 15 * MIN, "1h": 60 * MIN, "4h": 240 * MIN, "1d": 1440 * MIN };
   const oiSpikeT = o.oi?.spikeMinutesAgo === undefined ? null : Math.floor((startedAt - o.oi.spikeMinutesAgo * MIN) / (5 * MIN)) * 5 * MIN;
 
+  const curMinute = Math.floor(startedAt / MIN) * MIN;
   const mock: Mock = {
+    tradeRequests: [],
+    curMinute,
+    startedAt,
     oiSpikeT,
     futures: [],
     requests: [],
@@ -136,6 +153,22 @@ export async function installMockBinance(context: BrowserContext, options: MockO
       return route.fulfill({
         json: Object.entries(BASE_PRICES).map(([symbol, v]) => ({ symbol, lastPrice: String(live(symbol)), openPrice: String(v * 0.98) })),
       });
+    }
+    if (u.pathname.endsWith("/aggTrades")) {
+      const tsym = u.searchParams.get("symbol")!;
+      const fromId = u.searchParams.get("fromId");
+      mock.tradeRequests.push(`${tsym}/${fromId === null ? "latest" : `from${fromId}`}`);
+      if (!o.trades) return route.abort();
+      if (tsym !== "BTCUSDT") return route.fulfill({ json: [] });
+      const limit = Math.min(1000, Number(u.searchParams.get("limit") ?? 500));
+      const end = TRADE_HISTORY + REST_OVERLAP; // newest trade the REST snapshot knows about
+      const start = fromId === null ? end - limit + 1 : Math.max(1, Number(fromId));
+      const rows = [];
+      for (let i = start; i < start + limit && i <= end; i++) {
+        const tr = tradeAt(i, curMinute, startedAt, BASE_PRICES.BTCUSDT);
+        rows.push({ a: tr.id, p: String(tr.p), q: String(tr.q), f: tr.id, l: tr.id, T: tr.t, m: tr.m, M: true });
+      }
+      return route.fulfill({ json: rows });
     }
     const sym = u.searchParams.get("symbol")!;
     const interval = u.searchParams.get("interval")!;
@@ -176,7 +209,15 @@ export async function installMockBinance(context: BrowserContext, options: MockO
   });
 
   await context.routeWebSocket(/data-stream\.binance\.vision/, (ws) => {
+    let sentTrades = false;
     const timer = setInterval(() => {
+      if (o.trades && !sentTrades) {
+        sentTrades = true; // the live batch is sent once, so counts stay exact
+        for (let i = TRADE_HISTORY + 1; i <= TRADE_HISTORY + LIVE_TRADES; i++) {
+          const tr = tradeAt(i, curMinute, startedAt, BASE_PRICES.BTCUSDT);
+          ws.send(JSON.stringify({ stream: "btcusdt@aggTrade", data: { e: "aggTrade", E: tr.t, s: "BTCUSDT", a: tr.id, p: String(tr.p), q: String(tr.q), f: tr.id, l: tr.id, T: tr.t, m: tr.m, M: true } }));
+        }
+      }
       for (const s of Object.keys(BASE_PRICES)) {
         const p = live(s);
         const t0 = Math.floor(startedAt / MIN) * MIN + mock.state.minuteShift * MIN;

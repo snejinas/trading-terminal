@@ -11,6 +11,19 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  FP_MAX_CANDLES,
+  FP_MIN_ROW_PX,
+  FP_TEXT_MIN_SLOT,
+  flowCoverage,
+  footprintOf,
+  fmtFlow,
+  imbalances,
+  loadFootprintPref,
+  niceStep,
+  saveFootprintPref,
+  type Footprint,
+} from "@/lib/trading/footprint";
+import {
   VP_MAX_ROWS,
   VP_MAX_VA,
   VP_MAX_WIDTH,
@@ -279,6 +292,9 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const liqCache = useRef<{ key: string; mode: LiqMode; segments: Segment[]; top: Segment[] } | null>(null);
   const [vpCfg, setVpCfg] = useState<VpConfig>(loadVpConfig); // volume profile (remembered)
   const vpRef = useRef(vpCfg);
+  const [fpShown, setFpShown] = useState(loadFootprintPref); // order flow footprint (remembered)
+  const fpOn = useRef(fpShown);
+  const fpCache = useRef<{ key: string; fps: (Footprint | null)[]; ims: [boolean, boolean][][] } | null>(null);
   const vpCache = useRef<{ key: string; prof: Profile; stats: ProfileStats | null } | null>(null);
   const srCache = useRef<{ key: string; k: (number | null)[]; d: (number | null)[] } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
@@ -611,6 +627,112 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.stroke();
       ctx.fillRect(x - bw / 2, y(Math.max(c.o, c.c)), bw, Math.max(1, Math.abs(y(c.o) - y(c.c))));
     });
+
+    // order flow footprint: per candle and price row, volume sold at the bid | bought at the ask (needs trade data)
+    cv.dataset.fp = "";
+    if (fpOn.current) {
+      void market.loadFlow?.(sym); // cheap: backfills once, never throws
+      const labelY = priceBottom - 20 - 18 * ((liqOn.current ? 1 : 0) + (vpRef.current.enabled ? 1 : 0));
+      let label = "";
+      if (!market.flowFor) {
+        cv.dataset.fp = JSON.stringify({ available: false });
+        label = "Footprint · needs live Binance trades (not available on the simulated feed)";
+      } else {
+        const store = market.flowFor(sym);
+        const zoomedOut = data.length > FP_MAX_CANDLES;
+        const pstep = niceStep((hi - lo) / Math.max(4, Math.floor((priceBottom - pad) / FP_MIN_ROW_PX)));
+        const rowPx = (priceBottom - pad) / ((hi - lo) / pstep);
+        const fKey = `${sym}|${tf}|${first}|${data.length}|${store?.trades ?? 0}|${pstep}|${tfMs}|${zoomedOut}`;
+        if (fpCache.current?.key !== fKey) {
+          const fps = store && !zoomedOut ? data.map((c) => footprintOf(store, c.t, tfMs, pstep)) : [];
+          fpCache.current = { key: fKey, fps, ims: fps.map((f) => (f ? imbalances(f.levels) : [])) };
+        }
+        const { fps, ims } = fpCache.current;
+        let maxCell = 0;
+        for (const f of fps) if (f) for (const l of f.levels) maxCell = Math.max(maxCell, l.b + l.s);
+        const sw = step;
+        const showText = sw >= FP_TEXT_MIN_SLOT && rowPx >= FP_MIN_ROW_PX - 1;
+        if (maxCell > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, 0, plotW, priceBottom);
+          ctx.clip();
+          ctx.font = "9px ui-monospace, SFMono-Regular, Menlo, monospace";
+          fps.forEach((f, i) => {
+            if (!f) return;
+            const cx = xOf(first + i);
+            const x0 = cx - sw * 0.45;
+            const w = sw * 0.9;
+            if (x0 > plotW || x0 + w < 0) return;
+            f.levels.forEach((l, j) => {
+              const yTop = y((l.k + 1) * pstep);
+              const yBot = y(l.k * pstep);
+              const h = yBot - yTop;
+              ctx.fillStyle = "#0b0e14";
+              ctx.fillRect(x0, yTop, w, h);
+              const vol = l.b + l.s;
+              const a = 0.18 + 0.6 * Math.sqrt(vol / maxCell);
+              ctx.fillStyle = l.b >= l.s ? `rgba(38,208,124,${a})` : `rgba(255,91,107,${a})`;
+              ctx.fillRect(x0, yTop + 0.5, w, Math.max(1, h - 1));
+              if (showText) {
+                const [bi, si] = ims[i][j] ?? [false, false];
+                ctx.textBaseline = "middle";
+                ctx.fillStyle = si ? "#ffffff" : "#aeb7c6";
+                ctx.font = `${si ? "bold " : ""}9px ui-monospace, SFMono-Regular, Menlo, monospace`;
+                ctx.textAlign = "right";
+                ctx.fillText(fmtFlow(l.s), cx - 3, yTop + h / 2);
+                ctx.fillStyle = bi ? "#ffffff" : "#aeb7c6";
+                ctx.font = `${bi ? "bold " : ""}9px ui-monospace, SFMono-Regular, Menlo, monospace`;
+                ctx.textAlign = "left";
+                ctx.fillText(fmtFlow(l.b), cx + 3, yTop + h / 2);
+              }
+              if (l.k === f.pocK) {
+                ctx.strokeStyle = "rgba(248,250,252,0.9)";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x0 + 0.5, yTop + 0.5, w - 1, Math.max(1, h - 1));
+              }
+            });
+            if (showText) {
+              const low = f.levels[f.levels.length - 1];
+              ctx.textAlign = "center";
+              ctx.fillStyle = f.delta >= 0 ? "#26d07c" : "#ff5b6b";
+              ctx.font = "bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+              ctx.fillText(`Δ${f.delta >= 0 ? "+" : ""}${fmtFlow(Math.abs(f.delta)).replace("·", "0")}`, cx, y(low.k * pstep) + 9);
+            }
+          });
+          ctx.restore();
+          ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+        }
+        const cov = flowCoverage(store);
+        const hi2 = focusHover - first;
+        const hf = hi2 >= 0 && hi2 < fps.length ? fps[hi2] : null;
+        cv.dataset.fp = JSON.stringify({
+          available: true,
+          zoomedOut,
+          step: pstep,
+          rowPx,
+          coverage: cov,
+          max: maxCell,
+          withData: fps.filter(Boolean).length,
+          candles:
+            data.length <= 40
+              ? fps.map((f, i) => (f ? { t: f.t, buy: f.buy, sell: f.sell, delta: f.delta, pocK: f.pocK, levels: f.levels.map((l, j) => ({ k: l.k, price: l.price, b: l.b, s: l.s, bi: ims[i][j][0], si: ims[i][j][1] })) } : null)).filter(Boolean)
+              : [],
+          hover: hf ? { t: hf.t, buy: hf.buy, sell: hf.sell, delta: hf.delta, pocK: hf.pocK } : null,
+        });
+        label = zoomedOut
+          ? `Footprint · zoom in to ${FP_MAX_CANDLES} candles or fewer`
+          : cov.trades === 0
+            ? "Footprint · waiting for trades…"
+            : `Footprint · ${cov.trades} trades since ${new Date(cov.firstT!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${hf ? ` · Δ ${hf.delta >= 0 ? "+" : ""}${fmtFlow(Math.abs(hf.delta)).replace("·", "0")} · bought ${fmtFlow(hf.buy)} · sold ${fmtFlow(hf.sell)}` : ""}`;
+      }
+      ctx.fillStyle = "rgba(11,14,20,0.7)";
+      ctx.fillRect(4, labelY, ctx.measureText(label).width + 12, 16);
+      ctx.fillStyle = "#c7cfdd";
+      ctx.fillText(label, 10, labelY + 8);
+    }
 
     // moving averages (not part of the price autoscale), clipped to the price pane
     ctx.save();
@@ -1052,6 +1174,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       document.removeEventListener("keydown", onKey);
     };
   }, [panel]);
+  const toggleFp = useCallback(() => {
+    const next = !fpOn.current;
+    fpOn.current = next;
+    setFpShown(next);
+    saveFootprintPref(next);
+    drawRef.current();
+  }, []);
   const toggleLiq = useCallback(() => {
     const next = !liqOn.current;
     liqOn.current = next;
@@ -1365,6 +1494,15 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           className={`${btn} ${stochRsiCfg.enabled ? "text-white" : "text-slate-500"}`}
         >
           StochRSI
+        </button>
+        <button
+          aria-label="Order flow footprint"
+          aria-pressed={fpShown}
+          title="Order flow footprint: volume sold at the bid | bought at the ask, per price level"
+          onClick={toggleFp}
+          className={`${btn} ${fpShown ? "text-white" : "text-slate-500"}`}
+        >
+          FP
         </button>
         <button
           aria-label="Volume profile"

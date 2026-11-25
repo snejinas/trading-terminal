@@ -38,6 +38,11 @@ Other scripts: `npm run typecheck`, `npm test`.
   high–low range. Marks the point of control (busiest level, `POC`) and the value area (`VAH`/`VAL`, default 70%
   of the volume around it); levels (10–200) and value-area percentage (50–95) are settings, remembered. It always
   describes what is on screen, so it changes as you scroll and zoom.
+  **Order flow footprint** (`FP` button, off by default): for every candle and price row, the volume sold at the bid and
+  bought at the ask (from Binance's trade stream), with bold imbalances (3x diagonal), the busiest row outlined, a
+  per-candle delta, and numbers once a candle is wide enough. Rows are at least 11 px tall on a round price step. Trades are
+  recorded while the terminal is open, plus the latest ~3,000 fetched on first use, so only candles within that window have
+  a footprint (the label says since when). Drawn for 120 candles or fewer; zoom in to see it.
   **Fibonacci retracement** (`Fib` button): choose *Draw retracement*, then click the start and the end of a move
   (Esc cancels). Levels 0, 0.236, 0.382, 0.5, 0.618, 0.786 and 1 are drawn from the earlier point to the right edge,
   with optional extensions (1.272, 1.618, 2.618). Anchors are snapped to candles and stored as time + price, so they
@@ -70,6 +75,7 @@ src/lib/trading/
   timeframes.ts                     timeframes, candle aggregation/folding, time formatting
   chartview.ts                      chart zoom/scroll math
   indicators.ts                     SMA/EMA, Bollinger Bands, Stochastic RSI (and the RSI it is built on) and their settings
+  footprint.ts                      order flow footprint: trade store (per minute and price level), rows, imbalances
   volumeprofile.ts                  visible-range volume profile: levels, point of control, value area
   fib.ts                            Fibonacci levels, time/price anchors, hit-testing, per-symbol storage
   liquidations.ts                   estimated liquidation heatmap model (position inflow, levels, consumption, grid)
@@ -84,7 +90,7 @@ e2e/                                Playwright browser tests + the mocked Binanc
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, the volume profile, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic RSI (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+timeframes, the order flow footprint (trade store, rows, imbalances), the volume profile, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic RSI (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
 
 ### Browser tests (Playwright)
@@ -102,6 +108,7 @@ its order book is flat and every minute trades the same volume, which lets the t
 | --- | --- |
 | `chart-interaction` | wheel/drag/pinch/keyboard zoom and scroll, older-history paging, staying anchored to live candles |
 | `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
+| `chart-footprint` | backfill without double counting, exact buy/sell per row and candle, imbalances, 5m merging, colours, coverage, no-trade feeds |
 | `chart-volumeprofile` | every level against an independent calculation, POC and value area, settings, scroll/zoom, hover, no-volume feeds |
 | `chart-liquidation` | heatmap from volume and from open interest, exact levels and consumption times, fallback, fetch frequency |
 | `chart-fibonacci` | placing with two clicks, exact levels, anchoring through zoom/timeframes, dragging, persistence per symbol, limits |
@@ -138,6 +145,9 @@ running one on that port is reused.
   maintenance margin (0.5%) are fixed typical values, isolated margin only, and positions closed voluntarily are not
   removed. Open-interest history comes from Binance's futures API (public, last ~500 periods, may be geo-blocked);
   without it, or for candles older than it covers, the volume-based estimate is used / contributes nothing.
+- The footprint only covers trades seen since the terminal opened plus the latest ~3,000 (a few minutes of BTC, much
+  longer for quiet markets); it is not available on the simulated feed, and `aggTrade` direction is taken as reported
+  (buyer-is-maker means the seller was the aggressor). The store keeps the last four hours.
 - Volume is in base-asset units (e.g. BTC); the simulated feed's volume is synthetic.
 - Account data lives only in one browser's `localStorage` (use Export for backups).
 
