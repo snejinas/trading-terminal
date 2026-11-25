@@ -55,8 +55,10 @@ export interface MockOptions {
    * Shape of 1-minute history. "ramp": the candle k minutes from the (frozen) current minute is
    * open base+k, high base+k+1, low base+k-1, close base+k+0.5, so moving averages have closed forms
    * (the live candle itself closes at the flat base price). Other intervals always use the wave.
+   * "zigzag": the 1-minute close k minutes from the current minute is base + [0, 2, 1][k mod 3] (so every
+   * three minutes the price steps +2, -1, -1 going forward), open = close, high = close+1, low = close-1.
    */
-  history?: "wave" | "ramp";
+  history?: "wave" | "ramp" | "zigzag";
 }
 
 export interface Mock {
@@ -118,7 +120,12 @@ export async function installMockBinance(context: BrowserContext, options: MockO
     for (let t = Math.floor(endTime / ms) * ms; rows.length < limit && t + ms > floor; t -= ms) {
       const p = wave(sym, t);
       const row: (string | number)[] =
-        o.history === "ramp" && interval === "1m"
+        o.history === "zigzag" && interval === "1m"
+          ? ((k: number, b: number) => {
+              const c = b + [0, 2, 1][((k % 3) + 3) % 3];
+              return [t, String(c), String(c + 1), String(c - 1), String(c)];
+            })((t - Math.floor(startedAt / MIN) * MIN) / MIN, BASE_PRICES[sym])
+          : o.history === "ramp" && interval === "1m"
           ? ((k: number, b: number) => [t, String(b + k), String(b + k + 1), String(b + k - 1), String(b + k + 0.5)])(
               (t - Math.floor(startedAt / MIN) * MIN) / MIN,
               BASE_PRICES[sym]

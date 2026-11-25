@@ -11,6 +11,15 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  RSI_COLOR,
+  RSI_MAX_PERIOD,
+  RSI_MIN_PERIOD,
+  RSI_OVERBOUGHT,
+  RSI_OVERSOLD,
+  loadRsiConfig,
+  rsiOf,
+  saveRsiConfig,
+  type RsiConfig,
   BB_COLOR,
   BB_FILL,
   BB_MAX_MULT,
@@ -208,6 +217,10 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const bbRef = useRef(bbCfg);
   const [bbOpen, setBbOpen] = useState(false);
   const bbCache = useRef<{ key: string; bands: Bands } | null>(null);
+  const [rsiCfg, setRsiCfg] = useState<RsiConfig>(loadRsiConfig); // RSI pane (remembered)
+  const rsiRef = useRef(rsiCfg);
+  const [rsiOpen, setRsiOpen] = useState(false);
+  const rsiCache = useRef<{ key: string; values: (number | null)[] } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
   const controls = useRef<HTMLDivElement>(null);
 
@@ -271,6 +284,16 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     if (maCache.current?.key !== maKey) maCache.current = { key: maKey, series: computeMovingAverages(all, cfg) };
     const maSeries = maCache.current.series;
     const bb = bbRef.current;
+    const rcfg = rsiRef.current;
+    let rsiVals: (number | null)[] | null = null;
+    if (rcfg.enabled) {
+      const rKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${rcfg.period}`;
+      if (rsiCache.current?.key !== rKey) rsiCache.current = { key: rKey, values: rsiOf(all, rcfg.period) };
+      rsiVals = rsiCache.current.values;
+    }
+    const fm = mouse.current;
+    const focusHover = fm && fm.x < plotW && fm.y < plotH ? Math.floor(fm.x / step + start) : -1;
+    const focusAt = focusHover >= 0 && focusHover < all.length ? focusHover : Math.min(all.length, Math.ceil(start + count)) - 1;
     let bands: Bands | null = null;
     if (bb.enabled) {
       const bbKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${bb.period}|${bb.mult}`;
@@ -281,7 +304,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     // ── panes: price on top, volume underneath (only when the visible candles carry volume) ──
     const hasVol = volOn.current && data.some((c) => c.v !== undefined);
     const volH = hasVol ? Math.min(90, Math.max(36, Math.round(plotH * 0.18))) : 0;
-    const priceBottom = plotH - (hasVol ? volH + 6 : 0);
+    const volTop = plotH - (hasVol ? volH + 6 : 0); // where the volume pane's block starts
+    const hasRsi = rsiRef.current.enabled;
+    const rsiH = hasRsi ? Math.min(90, Math.max(44, Math.round(plotH * 0.16))) : 0;
+    const priceBottom = volTop - (hasRsi ? rsiH + 6 : 0);
+    const rsiTop = priceBottom + 12; // headroom for the pane label
+    const rsiBottom = volTop - 3;
+    const rsiY = (v: number) => rsiTop + ((100 - v) / 100) * (rsiBottom - rsiTop);
     const volBottom = plotH;
     const volUsable = Math.max(1, volH - 14); // headroom for the pane label
     let maxV = 0;
@@ -290,6 +319,8 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     cv.dataset.vol = hasVol ? "1" : "0";
     cv.dataset.volh = String(volH);
     cv.dataset.maxv = hasVol ? String(maxV) : "";
+    cv.dataset.rsih = String(rsiH);
+    cv.dataset.priceh = String(priceBottom);
 
     // near the oldest loaded candle: fetch another page of history (once at a time, retry after a pause)
     if (start < 5) {
@@ -443,12 +474,64 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     });
     ctx.restore();
 
-    // volume pane
-    if (hasVol) {
+    // RSI pane: fixed 0-100 scale with the 30 / 70 levels
+    if (rsiVals) {
       ctx.strokeStyle = "rgba(255,255,255,0.08)";
       ctx.beginPath();
       ctx.moveTo(0, priceBottom + 3.5);
       ctx.lineTo(plotW, priceBottom + 3.5);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(244,114,182,0.06)";
+      ctx.fillRect(0, rsiY(RSI_OVERBOUGHT), plotW, rsiY(RSI_OVERSOLD) - rsiY(RSI_OVERBOUGHT));
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = "rgba(255,255,255,0.22)";
+      ctx.beginPath();
+      for (const lvl of [RSI_OVERBOUGHT, RSI_OVERSOLD]) {
+        ctx.moveTo(0, Math.round(rsiY(lvl)) + 0.5);
+        ctx.lineTo(plotW, Math.round(rsiY(lvl)) + 0.5);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, priceBottom + 4, plotW, rsiBottom - priceBottom - 1);
+      ctx.clip();
+      ctx.strokeStyle = RSI_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      let rpen = false;
+      for (let k = Math.max(0, first - 1); k < Math.min(all.length, Math.ceil(start + count) + 1); k++) {
+        const val = rsiVals[k];
+        if (val === null) {
+          rpen = false;
+          continue;
+        }
+        if (rpen) ctx.lineTo(xOf(k), rsiY(val));
+        else {
+          ctx.moveTo(xOf(k), rsiY(val));
+          rpen = true;
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+      const rv = rsiVals[focusAt] ?? null;
+      cv.dataset.rsi = JSON.stringify({ label: `RSI ${rcfg.period}`, value: rv });
+      ctx.fillStyle = RSI_COLOR;
+      ctx.fillText(`RSI ${rcfg.period}  ${rv === null ? "—" : rv.toFixed(2)}`, 10, priceBottom + 15);
+      ctx.fillStyle = "#7d8799";
+      ctx.fillText(String(RSI_OVERBOUGHT), plotW + 8, rsiY(RSI_OVERBOUGHT));
+      ctx.fillText(String(RSI_OVERSOLD), plotW + 8, rsiY(RSI_OVERSOLD));
+    } else {
+      cv.dataset.rsi = "";
+    }
+
+    // volume pane
+    if (hasVol) {
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      ctx.beginPath();
+      ctx.moveTo(0, volTop + 3.5);
+      ctx.lineTo(plotW, volTop + 3.5);
       ctx.stroke();
       data.forEach((c, k) => {
         if (c.v === undefined) return;
@@ -460,7 +543,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       });
       ctx.fillStyle = "#7d8799";
       const newest = data[data.length - 1];
-      ctx.fillText(`Vol ${newest?.v !== undefined ? formatVolume(newest.v) : ""}`, 10, priceBottom + 15);
+      ctx.fillText(`Vol ${newest?.v !== undefined ? formatVolume(newest.v) : ""}`, 10, volTop + 15);
       ctx.fillText(formatVolume(maxV), plotW + 8, volBottom - volUsable); // axis: height of the tallest bar
     }
 
@@ -560,10 +643,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.lineTo(plotW, m.y + 0.5);
       ctx.stroke();
       ctx.setLineDash([]);
-      const inVol = hasVol && m.y > priceBottom;
+      const inVol = hasVol && m.y > volTop;
+      const inRsi = !inVol && hasRsi && m.y > priceBottom;
       const tag = inVol
         ? formatVolume(Math.max(0, ((volBottom - m.y) / volUsable) * maxV))
-        : fmt(hi - ((m.y - pad) / (priceBottom - pad)) * (hi - lo), dp);
+        : inRsi
+          ? Math.min(100, Math.max(0, 100 - ((m.y - rsiTop) / (rsiBottom - rsiTop)) * 100)).toFixed(1)
+          : fmt(hi - ((m.y - pad) / (priceBottom - pad)) * (hi - lo), dp);
       ctx.fillStyle = "#2a3140";
       ctx.fillRect(plotW + 2, m.y - 9, axisW - 2, 18);
       ctx.fillStyle = "#e6eaf2";
@@ -635,6 +721,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     saveMaConfig(next);
     drawRef.current();
   }, []);
+  const updateRsi = useCallback((next: RsiConfig) => {
+    rsiRef.current = next;
+    setRsiCfg(next);
+    saveRsiConfig(next);
+    drawRef.current();
+  }, []);
   const updateBb = useCallback((next: BbConfig) => {
     bbRef.current = next;
     setBbCfg(next);
@@ -643,17 +735,19 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   }, []);
   // the indicator popovers close on Escape or a click outside them
   useEffect(() => {
-    if (!maOpen && !bbOpen) return;
+    if (!maOpen && !bbOpen && !rsiOpen) return;
     const onDown = (e: PointerEvent) => {
       if (controls.current && !controls.current.contains(e.target as Node)) {
         setMaOpen(false);
         setBbOpen(false);
+        setRsiOpen(false);
       }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setMaOpen(false);
         setBbOpen(false);
+        setRsiOpen(false);
       }
     };
     document.addEventListener("pointerdown", onDown);
@@ -662,7 +756,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [maOpen, bbOpen]);
+  }, [maOpen, bbOpen, rsiOpen]);
   const toggleVol = useCallback(() => {
     const next = !volOn.current;
     volOn.current = next;
@@ -820,6 +914,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           onClick={() => {
             setMaOpen((o) => !o);
             setBbOpen(false);
+            setRsiOpen(false);
           }}
           className={`${btn} ${maCfg.some((s) => s.enabled) ? "text-white" : "text-slate-500"}`}
         >
@@ -833,10 +928,25 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           onClick={() => {
             setBbOpen((o) => !o);
             setMaOpen(false);
+            setRsiOpen(false);
           }}
           className={`${btn} ${bbCfg.enabled ? "text-white" : "text-slate-500"}`}
         >
           BB
+        </button>
+        <button
+          aria-label="RSI"
+          aria-pressed={rsiCfg.enabled}
+          aria-expanded={rsiOpen}
+          title="Relative Strength Index"
+          onClick={() => {
+            setRsiOpen((o) => !o);
+            setMaOpen(false);
+            setBbOpen(false);
+          }}
+          className={`${btn} ${rsiCfg.enabled ? "text-white" : "text-slate-500"}`}
+        >
+          RSI
         </button>
         <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1.25)} className={btn}>
           −
@@ -850,6 +960,16 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           </button>
         )}
       </div>
+      {rsiOpen && (
+        <div role="dialog" aria-label="RSI" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
+          <label className="flex items-center gap-2 py-0.5">
+            <input type="checkbox" aria-label="Show RSI" checked={rsiCfg.enabled} onChange={(e) => updateRsi({ ...rsiCfg, enabled: e.target.checked })} />
+            <span className="inline-block h-0.5 w-3" style={{ background: RSI_COLOR }} />
+            <span className="text-slate-200">Relative Strength Index</span>
+          </label>
+          <NumField label="RSI period" text="Period" value={rsiCfg.period} min={RSI_MIN_PERIOD} max={RSI_MAX_PERIOD} integer onCommit={(v) => updateRsi({ ...rsiCfg, period: v })} />
+        </div>
+      )}
       {bbOpen && (
         <div role="dialog" aria-label="Bollinger Bands" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
           <label className="flex items-center gap-2 py-0.5">

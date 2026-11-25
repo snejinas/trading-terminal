@@ -180,3 +180,89 @@ export function saveBbConfig(cfg: BbConfig): void {
     /* storage may be blocked; the setting just won't be remembered */
   }
 }
+
+// ───────── RSI ─────────
+export interface RsiConfig {
+  enabled: boolean;
+  period: number;
+}
+export const RSI_MIN_PERIOD = 2;
+export const RSI_MAX_PERIOD = 200;
+export const RSI_COLOR = "#f472b6";
+export const RSI_OVERBOUGHT = 70;
+export const RSI_OVERSOLD = 30;
+export const DEFAULT_RSI: RsiConfig = { enabled: false, period: 14 };
+const RSI_KEY = "lifeinception.terminal.chart.rsi.v1";
+
+const rsiFrom = (avgGain: number, avgLoss: number): number => {
+  if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+};
+
+/**
+ * Relative Strength Index with Wilder's smoothing. The first value (at index `period`) uses the plain
+ * average of the first `period` price changes; later values smooth with (prev × (period−1) + new) / period.
+ * No movement at all reads 50. A non-finite value yields null and the next change spans the gap.
+ */
+export function rsi(values: number[], period: number): (number | null)[] {
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  if (!Number.isInteger(period) || period < 2) return out;
+  let prev: number | null = null;
+  let seen = 0;
+  let sumG = 0;
+  let sumL = 0;
+  let avgG = 0;
+  let avgL = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v)) continue;
+    if (prev === null) {
+      prev = v;
+      continue;
+    }
+    const ch = v - prev;
+    prev = v;
+    const g = ch > 0 ? ch : 0;
+    const l = ch < 0 ? -ch : 0;
+    if (seen < period) {
+      sumG += g;
+      sumL += l;
+      if (++seen === period) {
+        avgG = sumG / period;
+        avgL = sumL / period;
+        out[i] = rsiFrom(avgG, avgL);
+      }
+    } else {
+      avgG = (avgG * (period - 1) + g) / period;
+      avgL = (avgL * (period - 1) + l) / period;
+      out[i] = rsiFrom(avgG, avgL);
+    }
+  }
+  return out;
+}
+
+export const rsiOf = (candles: Candle[], period: number) =>
+  rsi(candles.map((c) => c.c), period);
+
+export function parseRsiConfig(raw: unknown): RsiConfig {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const period = typeof o.period === "number" && Number.isInteger(o.period) && o.period >= RSI_MIN_PERIOD && o.period <= RSI_MAX_PERIOD ? o.period : DEFAULT_RSI.period;
+  return { enabled: typeof o.enabled === "boolean" ? o.enabled : DEFAULT_RSI.enabled, period };
+}
+
+export function loadRsiConfig(): RsiConfig {
+  try {
+    const s = window.localStorage.getItem(RSI_KEY);
+    return parseRsiConfig(s ? JSON.parse(s) : null);
+  } catch {
+    return { ...DEFAULT_RSI };
+  }
+}
+
+export function saveRsiConfig(cfg: RsiConfig): void {
+  try {
+    window.localStorage.setItem(RSI_KEY, JSON.stringify(cfg));
+  } catch {
+    /* storage may be blocked; the setting just won't be remembered */
+  }
+}

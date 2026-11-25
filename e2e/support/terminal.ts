@@ -109,3 +109,22 @@ export const chartBb = (page: Page): Promise<BbReading | null> =>
     const s = (c as HTMLCanvasElement).dataset.bb;
     return s ? JSON.parse(s) : null;
   });
+
+export interface RsiReading {
+  label: string;
+  value: number | null;
+}
+
+/** The RSI pane's label as drawn (null while the pane is off). */
+export const chartRsi = (page: Page): Promise<RsiReading | null> =>
+  chartCanvas(page).evaluate((c) => {
+    const s = (c as HTMLCanvasElement).dataset.rsi;
+    return s ? JSON.parse(s) : null;
+  });
+
+/** Heights (css px) of the RSI pane and of the price pane above it. */
+export const paneHeights = (page: Page): Promise<{ rsih: number; priceh: number; volh: number }> =>
+  chartCanvas(page).evaluate((c) => {
+    const d = (c as HTMLCanvasElement).dataset;
+    return { rsih: Number(d.rsih), priceh: Number(d.priceh), volh: Number(d.volh) };
+  });
