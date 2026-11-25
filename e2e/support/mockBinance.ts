@@ -51,17 +51,30 @@ export interface MockOptions {
   depth?: { size?: string; stepFraction?: number };
   /** Live quotes: constant (default) or following the same wave as the history. */
   livePrice?: "flat" | "wave";
+  /** Futures open-interest history. Omitted: the futures host is unreachable (the heatmap falls back to volume). */
+  oi?: MockOiOptions;
   /**
    * Shape of 1-minute history. "ramp": the candle k minutes from the (frozen) current minute is
    * open base+k, high base+k+1, low base+k-1, close base+k+0.5, so moving averages have closed forms
    * (the live candle itself closes at the flat base price). Other intervals always use the wave.
    * "zigzag": the 1-minute close k minutes from the current minute is base + [0, 2, 1][k mod 3] (so every
    * three minutes the price steps +2, -1, -1 going forward), open = close, high = close+1, low = close-1.
+   * "swing": the 1-minute close k minutes from the current minute is base x (1 + 0.03 sin(2 pi k / 48)), open = close,
+   * high = close x 1.001, low = close x 0.999: a +-3% swing every 48 minutes, so liquidation levels get traded through.
    */
-  history?: "wave" | "ramp" | "zigzag";
+  history?: "wave" | "ramp" | "zigzag" | "swing";
+}
+
+export interface MockOiOptions {
+  /** Open interest jumps by 100M USD (from a flat 1B) at the first 5-minute snapshot this many minutes back. */
+  spikeMinutesAgo?: number;
 }
 
 export interface Mock {
+  /** Open-interest requests seen, as `SYMBOL/period`. */
+  futures: string[];
+  /** Timestamp of the 5-minute open-interest snapshot at which the jump shows up (the growth happened in the five minutes before it). */
+  oiSpikeT: number | null;
   /** Kline requests seen, as `SYMBOL/interval` (suffix `/older` for backwards-paging requests). */
   requests: string[];
   state: {
@@ -82,7 +95,12 @@ export async function installMockBinance(context: BrowserContext, options: MockO
   const originMs = o.historyMinutes === undefined ? null : Math.floor(startedAt / MIN) * MIN - o.historyMinutes * MIN;
   const spikeT = o.spikeMinutesAgo === undefined ? null : Math.floor(startedAt / MIN) * MIN - o.spikeMinutesAgo * MIN;
 
+  const oiPeriodMs: Record<string, number> = { "5m": 5 * MIN, "15m": 15 * MIN, "1h": 60 * MIN, "4h": 240 * MIN, "1d": 1440 * MIN };
+  const oiSpikeT = o.oi?.spikeMinutesAgo === undefined ? null : Math.floor((startedAt - o.oi.spikeMinutesAgo * MIN) / (5 * MIN)) * 5 * MIN;
+
   const mock: Mock = {
+    oiSpikeT,
+    futures: [],
     requests: [],
     state: { minuteShift: 0 },
     spikeT,
@@ -96,6 +114,21 @@ export async function installMockBinance(context: BrowserContext, options: MockO
   // every minute trades 10, the spike minute 100; a bucket's volume is the sum of its minutes
   const volumeOf = (bucket: number, ms: number) =>
     (ms / MIN) * 10 + (spikeT !== null && bucket <= spikeT && spikeT < bucket + ms ? 90 : 0);
+
+  await context.route("**/fapi.binance.com/**", async (route) => {
+    const u = new URL(route.request().url());
+    mock.futures.push(`${u.searchParams.get("symbol")}/${u.searchParams.get("period")}`);
+    if (!o.oi) return route.abort();
+    const pms = oiPeriodMs[u.searchParams.get("period") ?? ""];
+    if (!pms) return route.fulfill({ status: 400, json: { code: -1121 } });
+    const limit = Math.min(500, Number(u.searchParams.get("limit") ?? 30));
+    const spikeTs = o.oi.spikeMinutesAgo === undefined ? null : Math.floor((startedAt - o.oi.spikeMinutesAgo * MIN) / pms) * pms;
+    const rows = [];
+    for (let ts = Math.floor(startedAt / pms) * pms, n = 0; n < limit; ts -= pms, n++) {
+      rows.unshift({ symbol: u.searchParams.get("symbol"), sumOpenInterest: "1", sumOpenInterestValue: String(1e9 + (spikeTs !== null && ts >= spikeTs ? 1e8 : 0)), timestamp: ts });
+    }
+    return route.fulfill({ json: rows });
+  });
 
   await context.route("**/data-api.binance.vision/**", async (route) => {
     const u = new URL(route.request().url());
@@ -120,7 +153,12 @@ export async function installMockBinance(context: BrowserContext, options: MockO
     for (let t = Math.floor(endTime / ms) * ms; rows.length < limit && t + ms > floor; t -= ms) {
       const p = wave(sym, t);
       const row: (string | number)[] =
-        o.history === "zigzag" && interval === "1m"
+        o.history === "swing" && interval === "1m"
+          ? ((k: number, b: number) => {
+              const c = b * (1 + 0.03 * Math.sin((2 * Math.PI * k) / 48));
+              return [t, String(c), String(c * 1.001), String(c * 0.999), String(c)];
+            })((t - Math.floor(startedAt / MIN) * MIN) / MIN, BASE_PRICES[sym])
+          : o.history === "zigzag" && interval === "1m"
           ? ((k: number, b: number) => {
               const c = b + [0, 2, 1][((k % 3) + 3) % 3];
               return [t, String(c), String(c + 1), String(c - 1), String(c)];

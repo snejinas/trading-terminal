@@ -40,6 +40,11 @@ Other scripts: `npm run typecheck`, `npm test`.
   with optional extensions (1.272, 1.618, 2.618). Anchors are snapped to candles and stored as time + price, so they
   stay put through zoom, scroll and timeframe changes; drag an anchor to adjust it, delete from the popover.
   Up to 20 per symbol, remembered per symbol.
+  **Liquidation heatmap** (`Liq` button, off by default): an *estimate* of where leveraged positions would be
+  liquidated, shaded underneath the candles. Binance does not publish this, so it is modelled: each candle opens
+  new positions (sized from open-interest growth when Binance's futures data is reachable, otherwise from traded
+  volume), split over 5x–100x leverage and long/short, each with a liquidation price at its entry ∓ margin; a level
+  stays on the map until price trades through it. Colours are relative to the hottest cell in view.
 - **Paper account** ($100k): market and limit orders, positions, working orders, fills, P&L.
 - **Realistic fills**: market and marketable-limit orders *walk the order book* level by level and fill at the
   volume-weighted price. Your own fills deplete the book and it recovers over time (5 s half-life).
@@ -63,6 +68,7 @@ src/lib/trading/
   chartview.ts                      chart zoom/scroll math
   indicators.ts                     SMA/EMA, Bollinger Bands, RSI, Stochastic and their settings
   fib.ts                            Fibonacci levels, time/price anchors, hit-testing, per-symbol storage
+  liquidations.ts                   estimated liquidation heatmap model (position inflow, levels, consumption, grid)
   slippage.ts                       pre-trade slippage analysis
   fees.ts                           fee tiers and settings
   backup.ts / storage.ts            account export/import and browser persistence
@@ -74,7 +80,7 @@ e2e/                                Playwright browser tests + the mocked Binanc
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, Fibonacci levels and time/index mapping, moving averages, Bollinger Bands, RSI and Stochastic (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+timeframes, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
 
 ### Browser tests (Playwright)
@@ -92,6 +98,7 @@ its order book is flat and every minute trades the same volume, which lets the t
 | --- | --- |
 | `chart-interaction` | wheel/drag/pinch/keyboard zoom and scroll, older-history paging, staying anchored to live candles |
 | `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
+| `chart-liquidation` | heatmap from volume and from open interest, exact levels and consumption times, fallback, fetch frequency |
 | `chart-fibonacci` | placing with two clicks, exact levels, anchoring through zoom/timeframes, dragging, persistence per symbol, limits |
 | `chart-stochastic` | exact %K/%D on a zigzag history, stacking with RSI and volume, inputs, persistence, popovers |
 | `chart-rsi` | exact Wilder values on a zigzag history, pane layout with volume, period input, persistence |
@@ -123,6 +130,10 @@ running one on that port is reused.
   between two stream messages can count a fraction of a second of volume twice.
 - Moving averages use the candles loaded so far; an EMA seeded near the start of a short history is less
   accurate than one with plenty of warm-up, and an average longer than the history shows `—`.
+- The liquidation heatmap is a model, not exchange data: the long/short split is assumed even, leverage tiers and
+  maintenance margin (0.5%) are fixed typical values, isolated margin only, and positions closed voluntarily are not
+  removed. Open-interest history comes from Binance's futures API (public, last ~500 periods, may be geo-blocked);
+  without it, or for candles older than it covers, the volume-based estimate is used / contributes nothing.
 - Volume is in base-asset units (e.g. BTC); the simulated feed's volume is synthetic.
 - Account data lives only in one browser's `localStorage` (use Export for backups).
 

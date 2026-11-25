@@ -202,3 +202,46 @@ export const pixelAt = (page: Page, x: number, y: number): Promise<[number, numb
     },
     [x, y]
   );
+
+export interface LiqSegment {
+  side: "long" | "short";
+  lev: number;
+  price: number;
+  amount: number;
+  fromT: number;
+  toT: number | null;
+}
+export interface LiqState {
+  mode: "oi" | "volume";
+  rows: number;
+  cols: number;
+  group: number;
+  max: number;
+  segments: number;
+  hover: { price: number; pct: number } | null;
+  top: LiqSegment[];
+}
+
+/** The liquidation heatmap's model state (null while it is off). */
+export const chartLiq = (page: Page): Promise<LiqState | null> =>
+  chartCanvas(page).evaluate((c) => {
+    const s = (c as HTMLCanvasElement).dataset.liq;
+    return s ? JSON.parse(s) : null;
+  });
+
+/**
+ * Canvas pixels in the price pane that are blue / purple / teal (the cold half of the heat ramp). Candles are green or
+ * red, text is grey and the background is near black, so this is ~0 without a heatmap. Compare on versus off rather
+ * than expecting exact numbers.
+ */
+export const heatPixels = (page: Page): Promise<number> =>
+  chartCanvas(page).evaluate((el) => {
+    const c = el as HTMLCanvasElement;
+    const dpr = window.devicePixelRatio || 1;
+    const h = Math.round(Number(c.dataset.priceh) * dpr);
+    const w = Math.round((c.clientWidth - 84) * dpr);
+    const d = c.getContext("2d")!.getImageData(0, Math.round(14 * dpr), w, h - Math.round(40 * dpr)).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 2] > 60 && d[i + 2] > d[i] + 30 && d[i + 2] >= d[i + 1] - 5) n++;
+    return n;
+  });

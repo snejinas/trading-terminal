@@ -11,6 +11,16 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  buildGrid,
+  buildSegments,
+  heatColor,
+  inflowFor,
+  loadLiqPref,
+  saveLiqPref,
+  type LiqMode,
+  type Segment,
+} from "@/lib/trading/liquidations";
+import {
   FIB_MAX_PER_SYMBOL,
   fibColor,
   fibLevels,
@@ -260,6 +270,10 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const fibDrag = useRef<{ id: string; which: "a" | "b" } | null>(null);
   const lastFibAction = useRef(0);
   const geo = useRef<{ hi: number; lo: number; pad: number; priceBottom: number; start: number; step: number; plotW: number; all: Candle[]; tfMs: number } | null>(null);
+  // estimated liquidation heatmap (remembered); the segment model is cached per data set, the grid per view
+  const [liqShown, setLiqShown] = useState(loadLiqPref);
+  const liqOn = useRef(liqShown);
+  const liqCache = useRef<{ key: string; mode: LiqMode; segments: Segment[]; top: Segment[] } | null>(null);
   const stochCache = useRef<{ key: string; k: (number | null)[]; d: (number | null)[] } | null>(null);
   const rsiCache = useRef<{ key: string; values: (number | null)[] } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
@@ -455,6 +469,72 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.fillText(formatAxisTime(c.t, tfMs), x, plotH + 12);
     });
     ctx.textAlign = "left";
+
+    // estimated liquidation heatmap, underneath the candles
+    cv.dataset.liq = "";
+    if (liqOn.current) {
+      void market.loadOpenInterest?.(sym, tf); // cheap: refreshes at most once a minute, never throws
+      const oi = market.openInterestFor?.(sym, tf) ?? null;
+      const lKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${all[all.length - 1].h}|${all[all.length - 1].l}|${all[all.length - 1].v ?? ""}|${oi ? `${oi.length}:${oi[oi.length - 1].t}:${oi[oi.length - 1].v}` : "-"}`;
+      if (liqCache.current?.key !== lKey) {
+        const { mode, inflow } = inflowFor(all, oi, tfMs);
+        const segments = buildSegments(all, inflow);
+        liqCache.current = { key: lKey, mode, segments, top: [...segments].sort((a, b) => b.amount - a.amount).slice(0, 12) };
+      }
+      const { mode, segments, top } = liqCache.current;
+      const rowPx = 3;
+      const rows = Math.max(1, Math.floor((priceBottom - pad) / rowPx));
+      const lastVis = Math.min(all.length - 1, Math.ceil(start + count) - 1);
+      const grid = buildGrid(segments, first, lastVis, lo, hi, rows, 400);
+      let hover: { price: number; pct: number } | null = null;
+      if (grid.cols > 0 && grid.max > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, plotW, priceBottom);
+        ctx.clip();
+        const rowH = (priceBottom - pad) / rows;
+        const colW = grid.group * step;
+        for (let r = 0; r < grid.rows; r++) {
+          for (let c = 0; c < grid.cols; c++) {
+            const v = grid.cells[r * grid.cols + c];
+            if (v <= 0) continue;
+            const [cr, cg, cb] = heatColor(Math.sqrt(v / grid.max));
+            ctx.fillStyle = `rgba(${cr},${cg},${cb},0.85)`;
+            const x0 = xOf(first + c * grid.group) - step / 2;
+            ctx.fillRect(x0, pad + r * rowH, Math.min(colW, plotW - x0) + 0.5, rowH + 0.5);
+          }
+        }
+        ctx.restore();
+        const hm = mouse.current;
+        if (hm && hm.x < plotW && hm.y > pad && hm.y < priceBottom) {
+          const hc = Math.floor((Math.floor(hm.x / step + start) - first) / grid.group);
+          const hr = Math.min(grid.rows - 1, Math.floor((hm.y - pad) / rowH));
+          if (hc >= 0 && hc < grid.cols) hover = { price: hi - ((hr + 0.5) / grid.rows) * (hi - lo), pct: (grid.cells[hr * grid.cols + hc] / grid.max) * 100 };
+        }
+      }
+      cv.dataset.liq = JSON.stringify({
+        mode,
+        rows: grid.rows,
+        cols: grid.cols,
+        group: grid.group,
+        max: grid.max,
+        segments: segments.length,
+        hover,
+        top: top.map((s) => ({ side: s.side, lev: s.lev, price: s.price, amount: s.amount, fromT: all[s.from].t, toT: s.to < all.length ? all[s.to].t : null })),
+      });
+      // legend (bottom-left of the price pane): what this is, where the numbers come from, and the colour scale
+      const label = `Liq heatmap (estimate · ${mode === "oi" ? "open interest" : "volume"} based)${hover ? ` · ${hover.pct.toFixed(0)}% of peak` : ""}`;
+      ctx.fillStyle = "rgba(11,14,20,0.7)";
+      ctx.fillRect(4, priceBottom - 20, ctx.measureText(label).width + 86, 16);
+      ctx.fillStyle = "#c7cfdd";
+      ctx.fillText(label, 10, priceBottom - 12);
+      const gx = 10 + ctx.measureText(label).width + 8;
+      for (let i = 0; i < 60; i++) {
+        const [lr, lg, lb] = heatColor(i / 59);
+        ctx.fillStyle = `rgb(${lr},${lg},${lb})`;
+        ctx.fillRect(gx + i, priceBottom - 17, 1, 10);
+      }
+    }
 
     // candles
     const bw = Math.min(16, Math.max(1, step * 0.64));
@@ -965,6 +1045,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       document.removeEventListener("keydown", onKey);
     };
   }, [panel]);
+  const toggleLiq = useCallback(() => {
+    const next = !liqOn.current;
+    liqOn.current = next;
+    setLiqShown(next);
+    saveLiqPref(next);
+    drawRef.current();
+  }, []);
   const toggleVol = useCallback(() => {
     const next = !volOn.current;
     volOn.current = next;
@@ -1281,6 +1368,15 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           className={`${btn} ${stochCfg.enabled ? "text-white" : "text-slate-500"}`}
         >
           Stoch
+        </button>
+        <button
+          aria-label="Liquidation heatmap"
+          aria-pressed={liqShown}
+          title={liqShown ? "Hide the estimated liquidation heatmap" : "Show an estimated liquidation heatmap"}
+          onClick={toggleLiq}
+          className={`${btn} ${liqShown ? "text-white" : "text-slate-500"}`}
+        >
+          Liq
         </button>
         <button
           aria-label="Fibonacci retracement"

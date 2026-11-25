@@ -4,6 +4,7 @@
  */
 
 import { SIM_TIMEFRAMES, aggregateByTime, type Timeframe } from "./timeframes";
+import type { OiPoint } from "./liquidations";
 
 export interface Instrument {
   sym: string;
@@ -63,6 +64,12 @@ export interface Feed extends Quotes {
    * `done` means there is no more history to fetch (start of the market, or the per-series cap).
    */
   loadOlder(sym: string, timeframeId: string): Promise<{ added: number; done: boolean }>;
+  /**
+   * Open-interest history (USD notional snapshots) for the liquidation estimate, if this feed has any. `loadOpenInterest`
+   * is cheap to call often (it refreshes at most once a minute and never throws); `openInterestFor` returns what is held.
+   */
+  loadOpenInterest?(sym: string, timeframeId: string): Promise<void>;
+  openInterestFor?(sym: string, timeframeId: string): OiPoint[] | null;
   spread(sym: string): number;
   changePct(sym: string): number;
   /** True while this symbol's visible book is still depleted by our own fills. */

@@ -5,9 +5,13 @@
  */
 import { ImpactBook, registerInstruments, type BookDepth, type Candle, type Feed, type Instrument, type Side } from "./engine";
 import { BINANCE_TIMEFRAMES, MAX_CANDLES, foldCandle, mergeLatest, olderThan } from "./timeframes";
+import { oiPeriod, parseOiRows, type OiPoint } from "./liquidations";
 
 const REST = "https://data-api.binance.vision/api/v3";
 const WS = "wss://data-stream.binance.vision/stream";
+// USD-M futures open-interest history (public, no key). May be unreachable or geo-blocked; the heatmap then uses volume.
+const FUTURES = "https://fapi.binance.com/futures/data";
+const OI_REFRESH_MS = 60_000;
 
 export const BINANCE_INSTRUMENTS: Instrument[] = [
   { sym: "BTCUSDT", name: "Bitcoin", start: 0, vol: 0, dp: 2 },
@@ -129,6 +133,33 @@ export class BinanceMarket implements Feed {
 
   candlesFor(sym: string, timeframeId: string): Candle[] {
     return timeframeId === "1m" ? (this.candles[sym] ?? []) : (this.tf[`${sym}|${timeframeId}`] ?? []);
+  }
+
+  private oi = new Map<string, { points: OiPoint[] | null; at: number; busy: boolean }>();
+
+  openInterestFor(sym: string, timeframeId: string): OiPoint[] | null {
+    return this.oi.get(`${sym}|${oiPeriod(timeframeId)}`)?.points ?? null;
+  }
+
+  /** Load / refresh open-interest history. Never throws; a failure is remembered for a minute so it is not retried every frame. */
+  async loadOpenInterest(sym: string, timeframeId: string): Promise<void> {
+    const period = oiPeriod(timeframeId);
+    const key = `${sym}|${period}`;
+    const e = this.oi.get(key);
+    if (e && (e.busy || Date.now() - e.at < OI_REFRESH_MS)) return;
+    const entry = e ?? { points: null, at: 0, busy: false };
+    entry.busy = true;
+    this.oi.set(key, entry);
+    try {
+      const rows = await fetchJson(`${FUTURES}/openInterestHist?symbol=${sym}&period=${period}&limit=500`);
+      const points = parseOiRows(rows);
+      if (points.length >= 2) entry.points = points;
+    } catch {
+      /* keep whatever we had (possibly nothing) */
+    } finally {
+      entry.at = Date.now();
+      entry.busy = false;
+    }
   }
 
   /** Fetch history for a timeframe (once; concurrent calls share one request). 1m is always loaded. */
