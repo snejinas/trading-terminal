@@ -37,27 +37,18 @@ import {
   type FibPoint,
 } from "@/lib/trading/fib";
 import {
-  STOCH_D_COLOR,
-  STOCH_K_COLOR,
-  STOCH_MAX_K,
-  STOCH_MAX_SMOOTH,
-  STOCH_MIN_K,
-  STOCH_OVERBOUGHT,
-  STOCH_OVERSOLD,
-  loadStochConfig,
-  saveStochConfig,
-  stochLabel,
-  stochastic,
-  type StochConfig,
-  RSI_COLOR,
-  RSI_MAX_PERIOD,
-  RSI_MIN_PERIOD,
-  RSI_OVERBOUGHT,
-  RSI_OVERSOLD,
-  loadRsiConfig,
-  rsiOf,
-  saveRsiConfig,
-  type RsiConfig,
+  STOCHRSI_D_COLOR,
+  STOCHRSI_K_COLOR,
+  STOCHRSI_MAX_PERIOD,
+  STOCHRSI_MAX_SMOOTH,
+  STOCHRSI_MIN_PERIOD,
+  STOCHRSI_OVERBOUGHT,
+  STOCHRSI_OVERSOLD,
+  loadStochRsiConfig,
+  saveStochRsiConfig,
+  stochRsiLabel,
+  stochRsiOf,
+  type StochRsiConfig,
   BB_COLOR,
   BB_FILL,
   BB_MAX_MULT,
@@ -251,14 +242,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const volOn = useRef(volShown);
   const [maCfg, setMaCfg] = useState<MaSlot[]>(loadMaConfig); // moving averages (remembered)
   const maRef = useRef(maCfg);
-  const [panel, setPanel] = useState<"ma" | "bb" | "rsi" | "stoch" | "fib" | null>(null); // which indicator popover is open
+  const [panel, setPanel] = useState<"ma" | "bb" | "stochrsi" | "fib" | null>(null); // which indicator popover is open
   const [bbCfg, setBbCfg] = useState<BbConfig>(loadBbConfig); // Bollinger Bands (remembered)
   const bbRef = useRef(bbCfg);
   const bbCache = useRef<{ key: string; bands: Bands } | null>(null);
-  const [rsiCfg, setRsiCfg] = useState<RsiConfig>(loadRsiConfig); // RSI pane (remembered)
-  const rsiRef = useRef(rsiCfg);
-  const [stochCfg, setStochCfg] = useState<StochConfig>(loadStochConfig); // Stochastic pane (remembered)
-  const stochRef = useRef(stochCfg);
+  const [stochRsiCfg, setStochRsiCfg] = useState<StochRsiConfig>(loadStochRsiConfig); // Stochastic RSI pane (remembered)
+  const stochRsiRef = useRef(stochRsiCfg);
   // Fibonacci retracements (per symbol, remembered): placed with two clicks, anchors live in (time, price)
   const [fibs, setFibs] = useState<Fib[]>([]);
   const fibsRef = useRef<Fib[]>([]);
@@ -274,8 +263,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const [liqShown, setLiqShown] = useState(loadLiqPref);
   const liqOn = useRef(liqShown);
   const liqCache = useRef<{ key: string; mode: LiqMode; segments: Segment[]; top: Segment[] } | null>(null);
-  const stochCache = useRef<{ key: string; k: (number | null)[]; d: (number | null)[] } | null>(null);
-  const rsiCache = useRef<{ key: string; values: (number | null)[] } | null>(null);
+  const srCache = useRef<{ key: string; k: (number | null)[]; d: (number | null)[] } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
   const controls = useRef<HTMLDivElement>(null);
 
@@ -339,22 +327,15 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     if (maCache.current?.key !== maKey) maCache.current = { key: maKey, series: computeMovingAverages(all, cfg) };
     const maSeries = maCache.current.series;
     const bb = bbRef.current;
-    const rcfg = rsiRef.current;
-    let rsiVals: (number | null)[] | null = null;
-    if (rcfg.enabled) {
-      const rKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${rcfg.period}`;
-      if (rsiCache.current?.key !== rKey) rsiCache.current = { key: rKey, values: rsiOf(all, rcfg.period) };
-      rsiVals = rsiCache.current.values;
-    }
-    const scfg = stochRef.current;
-    let stochVals: { k: (number | null)[]; d: (number | null)[] } | null = null;
+    const scfg = stochRsiRef.current;
+    let srVals: { k: (number | null)[]; d: (number | null)[] } | null = null;
     if (scfg.enabled) {
-      const sKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${all[all.length - 1].h}|${all[all.length - 1].l}|${scfg.k},${scfg.smooth},${scfg.d}`;
-      if (stochCache.current?.key !== sKey) {
-        const r = stochastic(all, scfg.k, scfg.smooth, scfg.d);
-        stochCache.current = { key: sKey, k: r.k, d: r.d };
+      const sKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${scfg.rsi},${scfg.stoch},${scfg.k},${scfg.d}`;
+      if (srCache.current?.key !== sKey) {
+        const r = stochRsiOf(all, scfg);
+        srCache.current = { key: sKey, k: r.k, d: r.d };
       }
-      stochVals = stochCache.current;
+      srVals = srCache.current;
     }
     const fm = mouse.current;
     const focusHover = fm && fm.x < plotW && fm.y < plotH ? Math.floor(fm.x / step + start) : -1;
@@ -370,22 +351,14 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     const hasVol = volOn.current && data.some((c) => c.v !== undefined);
     const volH = hasVol ? Math.min(90, Math.max(36, Math.round(plotH * 0.18))) : 0;
     const volTop = plotH - (hasVol ? volH + 6 : 0); // where the volume pane's block starts
-    // oscillator panes sit between the price chart and the volume bars: price | RSI | Stochastic | volume
-    const hasRsi = rsiRef.current.enabled;
-    const hasStoch = stochRef.current.enabled;
-    const nOsc = (hasRsi ? 1 : 0) + (hasStoch ? 1 : 0);
-    let oscH = nOsc ? Math.min(90, Math.max(44, Math.round(plotH * 0.16))) : 0;
-    if (nOsc) oscH = Math.max(30, Math.min(oscH, Math.floor((volTop - 120) / nOsc) - 6)); // keep the price chart usable
-    const rsiH = hasRsi ? oscH : 0;
-    const stochH = hasStoch ? oscH : 0;
-    const stochBlockTop = volTop - (hasStoch ? stochH + 6 : 0);
-    const priceBottom = stochBlockTop - (hasRsi ? rsiH + 6 : 0); // top of the RSI block
-    const rsiTop = priceBottom + 12; // headroom for the pane label
-    const rsiBottom = stochBlockTop - 3;
-    const rsiY = (v: number) => rsiTop + ((100 - v) / 100) * (rsiBottom - rsiTop);
-    const stochTop = stochBlockTop + 12;
-    const stochBottom = volTop - 3;
-    const stochY = (v: number) => stochTop + ((100 - v) / 100) * (stochBottom - stochTop);
+    // the Stochastic RSI pane sits between the price chart and the volume bars: price | StochRSI | volume
+    const hasOsc = stochRsiRef.current.enabled;
+    let oscH = hasOsc ? Math.min(90, Math.max(44, Math.round(plotH * 0.16))) : 0;
+    if (hasOsc) oscH = Math.max(30, Math.min(oscH, volTop - 120 - 6)); // keep the price chart usable
+    const priceBottom = volTop - (hasOsc ? oscH + 6 : 0); // top of the oscillator block
+    const oscTop = priceBottom + 12; // headroom for the pane label
+    const oscBottom = volTop - 3;
+    const oscY = (v: number) => oscTop + ((100 - v) / 100) * (oscBottom - oscTop);
     const volBottom = plotH;
     const volUsable = Math.max(1, volH - 14); // headroom for the pane label
     let maxV = 0;
@@ -394,8 +367,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     cv.dataset.vol = hasVol ? "1" : "0";
     cv.dataset.volh = String(volH);
     cv.dataset.maxv = hasVol ? String(maxV) : "";
-    cv.dataset.rsih = String(rsiH);
-    cv.dataset.stochh = String(stochH);
+    cv.dataset.osch = String(oscH);
     cv.dataset.priceh = String(priceBottom);
 
     // near the oldest loaded candle: fetch another page of history (once at a time, retry after a pause)
@@ -700,83 +672,31 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       });
     }
 
-    // RSI pane: fixed 0-100 scale with the 30 / 70 levels
-    if (rsiVals) {
+    // Stochastic RSI pane: %K and %D on a fixed 0-100 scale with the 20 / 80 levels
+    if (srVals) {
       ctx.strokeStyle = "rgba(255,255,255,0.08)";
       ctx.beginPath();
       ctx.moveTo(0, priceBottom + 3.5);
       ctx.lineTo(plotW, priceBottom + 3.5);
       ctx.stroke();
-      ctx.fillStyle = "rgba(244,114,182,0.06)";
-      ctx.fillRect(0, rsiY(RSI_OVERBOUGHT), plotW, rsiY(RSI_OVERSOLD) - rsiY(RSI_OVERBOUGHT));
-      ctx.setLineDash([3, 4]);
-      ctx.strokeStyle = "rgba(255,255,255,0.22)";
-      ctx.beginPath();
-      for (const lvl of [RSI_OVERBOUGHT, RSI_OVERSOLD]) {
-        ctx.moveTo(0, Math.round(rsiY(lvl)) + 0.5);
-        ctx.lineTo(plotW, Math.round(rsiY(lvl)) + 0.5);
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, priceBottom + 4, plotW, rsiBottom - priceBottom - 1);
-      ctx.clip();
-      ctx.strokeStyle = RSI_COLOR;
-      ctx.lineWidth = 1.5;
-      ctx.lineJoin = "round";
-      ctx.beginPath();
-      let rpen = false;
-      for (let k = Math.max(0, first - 1); k < Math.min(all.length, Math.ceil(start + count) + 1); k++) {
-        const val = rsiVals[k];
-        if (val === null) {
-          rpen = false;
-          continue;
-        }
-        if (rpen) ctx.lineTo(xOf(k), rsiY(val));
-        else {
-          ctx.moveTo(xOf(k), rsiY(val));
-          rpen = true;
-        }
-      }
-      ctx.stroke();
-      ctx.restore();
-      const rv = rsiVals[focusAt] ?? null;
-      cv.dataset.rsi = JSON.stringify({ label: `RSI ${rcfg.period}`, value: rv });
-      ctx.fillStyle = RSI_COLOR;
-      ctx.fillText(`RSI ${rcfg.period}  ${rv === null ? "—" : rv.toFixed(2)}`, 10, priceBottom + 15);
-      ctx.fillStyle = "#7d8799";
-      ctx.fillText(String(RSI_OVERBOUGHT), plotW + 8, rsiY(RSI_OVERBOUGHT));
-      ctx.fillText(String(RSI_OVERSOLD), plotW + 8, rsiY(RSI_OVERSOLD));
-    } else {
-      cv.dataset.rsi = "";
-    }
-
-    // Stochastic pane: %K and %D on a fixed 0-100 scale with the 20 / 80 levels
-    if (stochVals) {
-      ctx.strokeStyle = "rgba(255,255,255,0.08)";
-      ctx.beginPath();
-      ctx.moveTo(0, stochBlockTop + 3.5);
-      ctx.lineTo(plotW, stochBlockTop + 3.5);
-      ctx.stroke();
       ctx.fillStyle = "rgba(34,211,238,0.05)";
-      ctx.fillRect(0, stochY(STOCH_OVERBOUGHT), plotW, stochY(STOCH_OVERSOLD) - stochY(STOCH_OVERBOUGHT));
+      ctx.fillRect(0, oscY(STOCHRSI_OVERBOUGHT), plotW, oscY(STOCHRSI_OVERSOLD) - oscY(STOCHRSI_OVERBOUGHT));
       ctx.setLineDash([3, 4]);
       ctx.strokeStyle = "rgba(255,255,255,0.22)";
       ctx.beginPath();
-      for (const lvl of [STOCH_OVERBOUGHT, STOCH_OVERSOLD]) {
-        ctx.moveTo(0, Math.round(stochY(lvl)) + 0.5);
-        ctx.lineTo(plotW, Math.round(stochY(lvl)) + 0.5);
+      for (const lvl of [STOCHRSI_OVERBOUGHT, STOCHRSI_OVERSOLD]) {
+        ctx.moveTo(0, Math.round(oscY(lvl)) + 0.5);
+        ctx.lineTo(plotW, Math.round(oscY(lvl)) + 0.5);
       }
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(0, stochBlockTop + 4, plotW, stochBottom - stochBlockTop - 1);
+      ctx.rect(0, priceBottom + 4, plotW, oscBottom - priceBottom - 1);
       ctx.clip();
       ctx.lineWidth = 1.5;
       ctx.lineJoin = "round";
-      for (const [ser, color] of [[stochVals.d, STOCH_D_COLOR], [stochVals.k, STOCH_K_COLOR]] as const) {
+      for (const [ser, color] of [[srVals.d, STOCHRSI_D_COLOR], [srVals.k, STOCHRSI_K_COLOR]] as const) {
         ctx.strokeStyle = color;
         ctx.beginPath();
         let spen = false;
@@ -786,28 +706,28 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
             spen = false;
             continue;
           }
-          if (spen) ctx.lineTo(xOf(k), stochY(val));
+          if (spen) ctx.lineTo(xOf(k), oscY(val));
           else {
-            ctx.moveTo(xOf(k), stochY(val));
+            ctx.moveTo(xOf(k), oscY(val));
             spen = true;
           }
         }
         ctx.stroke();
       }
       ctx.restore();
-      const kv = stochVals.k[focusAt] ?? null;
-      const dv = stochVals.d[focusAt] ?? null;
-      cv.dataset.stoch = JSON.stringify({ label: stochLabel(scfg), k: kv, d: dv });
-      ctx.fillStyle = STOCH_K_COLOR;
-      const head = `${stochLabel(scfg)}  K ${kv === null ? "—" : kv.toFixed(2)}`;
-      ctx.fillText(head, 10, stochBlockTop + 15);
-      ctx.fillStyle = STOCH_D_COLOR;
-      ctx.fillText(`D ${dv === null ? "—" : dv.toFixed(2)}`, 10 + ctx.measureText(head).width + 12, stochBlockTop + 15);
+      const kv = srVals.k[focusAt] ?? null;
+      const dv = srVals.d[focusAt] ?? null;
+      cv.dataset.stochrsi = JSON.stringify({ label: stochRsiLabel(scfg), k: kv, d: dv });
+      ctx.fillStyle = STOCHRSI_K_COLOR;
+      const head = `${stochRsiLabel(scfg)}  K ${kv === null ? "—" : kv.toFixed(2)}`;
+      ctx.fillText(head, 10, priceBottom + 15);
+      ctx.fillStyle = STOCHRSI_D_COLOR;
+      ctx.fillText(`D ${dv === null ? "—" : dv.toFixed(2)}`, 10 + ctx.measureText(head).width + 12, priceBottom + 15);
       ctx.fillStyle = "#7d8799";
-      ctx.fillText(String(STOCH_OVERBOUGHT), plotW + 8, stochY(STOCH_OVERBOUGHT));
-      ctx.fillText(String(STOCH_OVERSOLD), plotW + 8, stochY(STOCH_OVERSOLD));
+      ctx.fillText(String(STOCHRSI_OVERBOUGHT), plotW + 8, oscY(STOCHRSI_OVERBOUGHT));
+      ctx.fillText(String(STOCHRSI_OVERSOLD), plotW + 8, oscY(STOCHRSI_OVERSOLD));
     } else {
-      cv.dataset.stoch = "";
+      cv.dataset.stochrsi = "";
     }
 
     // volume pane
@@ -928,16 +848,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.stroke();
       ctx.setLineDash([]);
       const inVol = hasVol && m.y > volTop;
-      const inStoch = !inVol && hasStoch && m.y > stochBlockTop;
-      const inRsi = !inVol && !inStoch && hasRsi && m.y > priceBottom;
-      const pct = (top: number, bottom: number) => Math.min(100, Math.max(0, 100 - ((m.y - top) / (bottom - top)) * 100)).toFixed(1);
+      const inOsc = !inVol && hasOsc && m.y > priceBottom;
       const tag = inVol
         ? formatVolume(Math.max(0, ((volBottom - m.y) / volUsable) * maxV))
-        : inStoch
-          ? pct(stochTop, stochBottom)
-          : inRsi
-            ? pct(rsiTop, rsiBottom)
-            : fmt(hi - ((m.y - pad) / (priceBottom - pad)) * (hi - lo), dp);
+        : inOsc
+          ? Math.min(100, Math.max(0, 100 - ((m.y - oscTop) / (oscBottom - oscTop)) * 100)).toFixed(1)
+          : fmt(hi - ((m.y - pad) / (priceBottom - pad)) * (hi - lo), dp);
       ctx.fillStyle = "#2a3140";
       ctx.fillRect(plotW + 2, m.y - 9, axisW - 2, 18);
       ctx.fillStyle = "#e6eaf2";
@@ -1009,16 +925,10 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     saveMaConfig(next);
     drawRef.current();
   }, []);
-  const updateStoch = useCallback((next: StochConfig) => {
-    stochRef.current = next;
-    setStochCfg(next);
-    saveStochConfig(next);
-    drawRef.current();
-  }, []);
-  const updateRsi = useCallback((next: RsiConfig) => {
-    rsiRef.current = next;
-    setRsiCfg(next);
-    saveRsiConfig(next);
+  const updateStochRsi = useCallback((next: StochRsiConfig) => {
+    stochRsiRef.current = next;
+    setStochRsiCfg(next);
+    saveStochRsiConfig(next);
     drawRef.current();
   }, []);
   const updateBb = useCallback((next: BbConfig) => {
@@ -1350,24 +1260,14 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           BB
         </button>
         <button
-          aria-label="RSI"
-          aria-pressed={rsiCfg.enabled}
-          aria-expanded={panel === "rsi"}
-          title="Relative Strength Index"
-          onClick={() => setPanel((p) => (p === "rsi" ? null : "rsi"))}
-          className={`${btn} ${rsiCfg.enabled ? "text-white" : "text-slate-500"}`}
+          aria-label="Stochastic RSI"
+          aria-pressed={stochRsiCfg.enabled}
+          aria-expanded={panel === "stochrsi"}
+          title="Stochastic RSI"
+          onClick={() => setPanel((p) => (p === "stochrsi" ? null : "stochrsi"))}
+          className={`${btn} ${stochRsiCfg.enabled ? "text-white" : "text-slate-500"}`}
         >
-          RSI
-        </button>
-        <button
-          aria-label="Stochastic"
-          aria-pressed={stochCfg.enabled}
-          aria-expanded={panel === "stoch"}
-          title="Stochastic oscillator"
-          onClick={() => setPanel((p) => (p === "stoch" ? null : "stoch"))}
-          className={`${btn} ${stochCfg.enabled ? "text-white" : "text-slate-500"}`}
-        >
-          Stoch
+          StochRSI
         </button>
         <button
           aria-label="Liquidation heatmap"
@@ -1448,27 +1348,18 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           )}
         </div>
       )}
-      {panel === "stoch" && (
-        <div role="dialog" aria-label="Stochastic" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
+      {panel === "stochrsi" && (
+        <div role="dialog" aria-label="Stochastic RSI" className="mt-1 w-60 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
           <label className="flex items-center gap-2 py-0.5">
-            <input type="checkbox" aria-label="Show Stochastic" checked={stochCfg.enabled} onChange={(e) => updateStoch({ ...stochCfg, enabled: e.target.checked })} />
-            <span className="inline-block h-0.5 w-3" style={{ background: STOCH_K_COLOR }} />
-            <span className="inline-block h-0.5 w-3" style={{ background: STOCH_D_COLOR }} />
-            <span className="text-slate-200">Stochastic</span>
+            <input type="checkbox" aria-label="Show Stochastic RSI" checked={stochRsiCfg.enabled} onChange={(e) => updateStochRsi({ ...stochRsiCfg, enabled: e.target.checked })} />
+            <span className="inline-block h-0.5 w-3" style={{ background: STOCHRSI_K_COLOR }} />
+            <span className="inline-block h-0.5 w-3" style={{ background: STOCHRSI_D_COLOR }} />
+            <span className="text-slate-200">Stochastic RSI</span>
           </label>
-          <NumField label="Stochastic K period" text="%K period" value={stochCfg.k} min={STOCH_MIN_K} max={STOCH_MAX_K} integer onCommit={(v) => updateStoch({ ...stochCfg, k: v })} />
-          <NumField label="Stochastic K smoothing" text="%K smoothing" value={stochCfg.smooth} min={1} max={STOCH_MAX_SMOOTH} integer onCommit={(v) => updateStoch({ ...stochCfg, smooth: v })} />
-          <NumField label="Stochastic D period" text="%D period" value={stochCfg.d} min={1} max={STOCH_MAX_SMOOTH} integer onCommit={(v) => updateStoch({ ...stochCfg, d: v })} />
-        </div>
-      )}
-      {panel === "rsi" && (
-        <div role="dialog" aria-label="RSI" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
-          <label className="flex items-center gap-2 py-0.5">
-            <input type="checkbox" aria-label="Show RSI" checked={rsiCfg.enabled} onChange={(e) => updateRsi({ ...rsiCfg, enabled: e.target.checked })} />
-            <span className="inline-block h-0.5 w-3" style={{ background: RSI_COLOR }} />
-            <span className="text-slate-200">Relative Strength Index</span>
-          </label>
-          <NumField label="RSI period" text="Period" value={rsiCfg.period} min={RSI_MIN_PERIOD} max={RSI_MAX_PERIOD} integer onCommit={(v) => updateRsi({ ...rsiCfg, period: v })} />
+          <NumField label="StochRSI RSI period" text="RSI period" value={stochRsiCfg.rsi} min={STOCHRSI_MIN_PERIOD} max={STOCHRSI_MAX_PERIOD} integer onCommit={(v) => updateStochRsi({ ...stochRsiCfg, rsi: v })} />
+          <NumField label="StochRSI lookback" text="Stochastic lookback" value={stochRsiCfg.stoch} min={STOCHRSI_MIN_PERIOD} max={STOCHRSI_MAX_PERIOD} integer onCommit={(v) => updateStochRsi({ ...stochRsiCfg, stoch: v })} />
+          <NumField label="StochRSI K smoothing" text="%K smoothing" value={stochRsiCfg.k} min={1} max={STOCHRSI_MAX_SMOOTH} integer onCommit={(v) => updateStochRsi({ ...stochRsiCfg, k: v })} />
+          <NumField label="StochRSI D smoothing" text="%D smoothing" value={stochRsiCfg.d} min={1} max={STOCHRSI_MAX_SMOOTH} integer onCommit={(v) => updateStochRsi({ ...stochRsiCfg, d: v })} />
         </div>
       )}
       {panel === "bb" && (

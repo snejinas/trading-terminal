@@ -1,4 +1,4 @@
-// RSI (Wilder): textbook values, a naive reference, invariants, bad data, settings.
+// RSI (Wilder), the building block of the Stochastic RSI: textbook values, a naive reference, invariants, bad data.
 const assert = require('assert');
 const I = require('../.test-build/indicators.js');
 const close = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps * Math.max(1, Math.abs(a), Math.abs(b));
@@ -59,25 +59,6 @@ assert.strictEqual(d[30], null); assert(d[31] !== null && Number.isFinite(d[31])
 // a bad value inside the seed window delays the first value by one
 const early = I.rsi([1, 2, NaN, 4, 3, 5, 4, 6], 3);
 assert.strictEqual(early.findIndex((x) => x !== null), 4); // would be 3 without the NaN
-// candles
-assert(close(I.rsiOf(walk.map((c, t) => ({ t, o: c, h: c, l: c, c })), 14)[100], base[100]));
-
-// config
-assert.deepStrictEqual(I.parseRsiConfig(undefined), I.DEFAULT_RSI);
-for (const junk of [null, 4, 'x', [], {}]) assert.deepStrictEqual(I.parseRsiConfig(junk), I.DEFAULT_RSI);
-assert.deepStrictEqual(I.parseRsiConfig({ enabled: true, period: 9 }), { enabled: true, period: 9 });
-for (const p of [1, 201, 3.5, '9', NaN]) assert.strictEqual(I.parseRsiConfig({ period: p }).period, 14, String(p));
-assert.strictEqual(I.parseRsiConfig({ period: 2 }).period, 2); assert.strictEqual(I.parseRsiConfig({ period: 200 }).period, 200);
-assert.strictEqual(I.parseRsiConfig({ enabled: 'yes' }).enabled, false);
-const mem = {};
-global.window = { localStorage: { getItem: (k) => (k in mem ? mem[k] : null), setItem: (k, v) => { mem[k] = String(v); } } };
-assert.deepStrictEqual(I.loadRsiConfig(), I.DEFAULT_RSI);
-I.saveRsiConfig({ enabled: true, period: 21 }); assert.deepStrictEqual(I.loadRsiConfig(), { enabled: true, period: 21 });
-mem[Object.keys(mem)[0]] = '{bad'; assert.deepStrictEqual(I.loadRsiConfig(), I.DEFAULT_RSI);
-global.window = { localStorage: { getItem() { throw new Error('x'); }, setItem() { throw new Error('x'); } } };
-assert.deepStrictEqual(I.loadRsiConfig(), I.DEFAULT_RSI); I.saveRsiConfig(I.DEFAULT_RSI);
-delete global.window;
-
 const big = Array.from({ length: 10000 }, (_, i) => 100 + Math.sin(i / 30) * 8 + rnd());
 const t0 = process.hrtime.bigint(); I.rsi(big, 14); const ms = Number(process.hrtime.bigint() - t0) / 1e6;
 assert(ms < 25, `10k candles took ${ms.toFixed(1)}ms`);

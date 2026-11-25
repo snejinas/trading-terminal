@@ -181,19 +181,7 @@ export function saveBbConfig(cfg: BbConfig): void {
   }
 }
 
-// ───────── RSI ─────────
-export interface RsiConfig {
-  enabled: boolean;
-  period: number;
-}
-export const RSI_MIN_PERIOD = 2;
-export const RSI_MAX_PERIOD = 200;
-export const RSI_COLOR = "#f472b6";
-export const RSI_OVERBOUGHT = 70;
-export const RSI_OVERSOLD = 30;
-export const DEFAULT_RSI: RsiConfig = { enabled: false, period: 14 };
-const RSI_KEY = "lifeinception.terminal.chart.rsi.v1";
-
+// ───────── RSI (the building block of the Stochastic RSI) ─────────
 const rsiFrom = (avgGain: number, avgLoss: number): number => {
   if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
   return 100 - 100 / (1 + avgGain / avgLoss);
@@ -241,48 +229,23 @@ export function rsi(values: number[], period: number): (number | null)[] {
   return out;
 }
 
-export const rsiOf = (candles: Candle[], period: number) =>
-  rsi(candles.map((c) => c.c), period);
-
-export function parseRsiConfig(raw: unknown): RsiConfig {
-  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const period = typeof o.period === "number" && Number.isInteger(o.period) && o.period >= RSI_MIN_PERIOD && o.period <= RSI_MAX_PERIOD ? o.period : DEFAULT_RSI.period;
-  return { enabled: typeof o.enabled === "boolean" ? o.enabled : DEFAULT_RSI.enabled, period };
-}
-
-export function loadRsiConfig(): RsiConfig {
-  try {
-    const s = window.localStorage.getItem(RSI_KEY);
-    return parseRsiConfig(s ? JSON.parse(s) : null);
-  } catch {
-    return { ...DEFAULT_RSI };
-  }
-}
-
-export function saveRsiConfig(cfg: RsiConfig): void {
-  try {
-    window.localStorage.setItem(RSI_KEY, JSON.stringify(cfg));
-  } catch {
-    /* storage may be blocked; the setting just won't be remembered */
-  }
-}
-
-// ───────── Stochastic oscillator ─────────
-export interface StochConfig {
+// ───────── Stochastic RSI ─────────
+export interface StochRsiConfig {
   enabled: boolean;
-  k: number; // lookback for the raw %K
-  smooth: number; // SMA applied to raw %K (1 = "fast" stochastic, 3 = the usual "slow" one)
-  d: number; // SMA of the smoothed %K
+  rsi: number; // RSI period
+  stoch: number; // lookback over which the RSI is placed between its lowest and highest value
+  k: number; // SMA applied to the raw value (%K)
+  d: number; // SMA of %K (%D)
 }
-export const STOCH_MIN_K = 2;
-export const STOCH_MAX_K = 200;
-export const STOCH_MAX_SMOOTH = 50;
-export const STOCH_K_COLOR = "#22d3ee";
-export const STOCH_D_COLOR = "#e879f9";
-export const STOCH_OVERBOUGHT = 80;
-export const STOCH_OVERSOLD = 20;
-export const DEFAULT_STOCH: StochConfig = { enabled: false, k: 14, smooth: 3, d: 3 };
-const STOCH_KEY = "lifeinception.terminal.chart.stoch.v1";
+export const STOCHRSI_MIN_PERIOD = 2;
+export const STOCHRSI_MAX_PERIOD = 200;
+export const STOCHRSI_MAX_SMOOTH = 50;
+export const STOCHRSI_K_COLOR = "#22d3ee";
+export const STOCHRSI_D_COLOR = "#e879f9";
+export const STOCHRSI_OVERBOUGHT = 80;
+export const STOCHRSI_OVERSOLD = 20;
+export const DEFAULT_STOCHRSI: StochRsiConfig = { enabled: false, rsi: 14, stoch: 14, k: 3, d: 3 };
+const STOCHRSI_KEY = "lifeinception.terminal.chart.stochrsi.v1";
 
 /** SMA over a series that may contain nulls; a window containing a null is null. */
 function smaNullable(values: (number | null)[], period: number): (number | null)[] {
@@ -299,57 +262,62 @@ function smaNullable(values: (number | null)[], period: number): (number | null)
 }
 
 /**
- * Stochastic oscillator. Raw %K = 100 × (close − lowest low) / (highest high − lowest low) over `k` candles
- * (50 when the window has no range); %K = SMA(raw, smooth); %D = SMA(%K, d). Candles with non-finite
- * high/low/close null every window that contains them.
+ * Stochastic RSI: where the RSI sits between its own lowest and highest value over the last `stoch` readings,
+ * 0-100 (50 when the RSI did not move at all in that window). %K = SMA(raw, k); %D = SMA(%K, d).
+ * It is more sensitive than the RSI and swings between its extremes far more often.
  */
-export function stochastic(candles: Candle[], k: number, smooth: number, d: number): { k: (number | null)[]; d: (number | null)[] } {
-  const n = candles.length;
+export function stochRsi(closes: number[], rsiPeriod: number, stochPeriod: number, kSmooth: number, dSmooth: number): { k: (number | null)[]; d: (number | null)[] } {
+  const r = rsi(closes, rsiPeriod);
+  const n = r.length;
   const raw: (number | null)[] = new Array(n).fill(null);
   const ok = (p: number) => Number.isInteger(p) && p >= 1;
-  if (!ok(k) || !ok(smooth) || !ok(d)) return { k: raw.slice(), d: raw.slice() };
-  let lastBad = -1;
+  if (!ok(stochPeriod) || stochPeriod < 2 || !ok(kSmooth) || !ok(dSmooth)) return { k: raw.slice(), d: raw.slice() };
+  let lastNull = -1;
   for (let i = 0; i < n; i++) {
-    const c = candles[i];
-    if (!Number.isFinite(c.h) || !Number.isFinite(c.l) || !Number.isFinite(c.c)) lastBad = i;
-    if (i < k - 1 || lastBad > i - k) continue;
+    if (r[i] === null) lastNull = i;
+    if (i < stochPeriod - 1 || lastNull > i - stochPeriod) continue;
     let hh = -Infinity;
     let ll = Infinity;
-    for (let j = i - k + 1; j <= i; j++) {
-      if (candles[j].h > hh) hh = candles[j].h;
-      if (candles[j].l < ll) ll = candles[j].l;
+    for (let j = i - stochPeriod + 1; j <= i; j++) {
+      const v = r[j] as number;
+      if (v > hh) hh = v;
+      if (v < ll) ll = v;
     }
-    raw[i] = hh === ll ? 50 : Math.min(100, Math.max(0, (100 * (c.c - ll)) / (hh - ll)));
+    raw[i] = hh === ll ? 50 : Math.min(100, Math.max(0, (100 * ((r[i] as number) - ll)) / (hh - ll)));
   }
-  const kk = smaNullable(raw, smooth);
-  return { k: kk, d: smaNullable(kk, d) };
+  const kk = smaNullable(raw, kSmooth);
+  return { k: kk, d: smaNullable(kk, dSmooth) };
 }
 
-export const stochLabel = (c: Pick<StochConfig, "k" | "smooth" | "d">) => `Stoch ${c.k},${c.smooth},${c.d}`;
+export const stochRsiOf = (candles: Candle[], c: Pick<StochRsiConfig, "rsi" | "stoch" | "k" | "d">) =>
+  stochRsi(candles.map((x) => x.c), c.rsi, c.stoch, c.k, c.d);
 
-export function parseStochConfig(raw: unknown): StochConfig {
+export const stochRsiLabel = (c: Pick<StochRsiConfig, "rsi" | "stoch" | "k" | "d">) => `StochRSI ${c.rsi},${c.stoch},${c.k},${c.d}`;
+
+export function parseStochRsiConfig(raw: unknown): StochRsiConfig {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const int = (v: unknown, lo: number, hi: number, def: number) => (typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi ? v : def);
   return {
-    enabled: typeof o.enabled === "boolean" ? o.enabled : DEFAULT_STOCH.enabled,
-    k: int(o.k, STOCH_MIN_K, STOCH_MAX_K, DEFAULT_STOCH.k),
-    smooth: int(o.smooth, 1, STOCH_MAX_SMOOTH, DEFAULT_STOCH.smooth),
-    d: int(o.d, 1, STOCH_MAX_SMOOTH, DEFAULT_STOCH.d),
+    enabled: typeof o.enabled === "boolean" ? o.enabled : DEFAULT_STOCHRSI.enabled,
+    rsi: int(o.rsi, STOCHRSI_MIN_PERIOD, STOCHRSI_MAX_PERIOD, DEFAULT_STOCHRSI.rsi),
+    stoch: int(o.stoch, STOCHRSI_MIN_PERIOD, STOCHRSI_MAX_PERIOD, DEFAULT_STOCHRSI.stoch),
+    k: int(o.k, 1, STOCHRSI_MAX_SMOOTH, DEFAULT_STOCHRSI.k),
+    d: int(o.d, 1, STOCHRSI_MAX_SMOOTH, DEFAULT_STOCHRSI.d),
   };
 }
 
-export function loadStochConfig(): StochConfig {
+export function loadStochRsiConfig(): StochRsiConfig {
   try {
-    const s = window.localStorage.getItem(STOCH_KEY);
-    return parseStochConfig(s ? JSON.parse(s) : null);
+    const s = window.localStorage.getItem(STOCHRSI_KEY);
+    return parseStochRsiConfig(s ? JSON.parse(s) : null);
   } catch {
-    return { ...DEFAULT_STOCH };
+    return { ...DEFAULT_STOCHRSI };
   }
 }
 
-export function saveStochConfig(cfg: StochConfig): void {
+export function saveStochRsiConfig(cfg: StochRsiConfig): void {
   try {
-    window.localStorage.setItem(STOCH_KEY, JSON.stringify(cfg));
+    window.localStorage.setItem(STOCHRSI_KEY, JSON.stringify(cfg));
   } catch {
     /* storage may be blocked; the setting just won't be remembered */
   }

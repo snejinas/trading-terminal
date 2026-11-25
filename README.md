@@ -30,11 +30,9 @@ Other scripts: `npm run typecheck`, `npm test`.
   remembered). A legend shows each value at the candle under the cursor, or at the newest visible candle.
   **Bollinger Bands** (`BB` button, off by default): SMA ± N standard deviations (population) of the close,
   period 1–500 and 0.1–10 deviations, drawn as a shaded band with a dashed middle line and an upper/middle/lower legend.
-  **RSI** (`RSI` button, off by default): Wilder's Relative Strength Index in its own pane between the price chart
-  and the volume bars, fixed 0–100 scale with the 30/70 levels, period 2–200, value in the pane label and the crosshair axis.
-  **Stochastic** (`Stoch` button, off by default): %K (lookback 2–200, smoothing 1–50) and %D (1–50) in a pane of
-  their own with the 20/80 levels; defaults 14,3,3 (the "slow" stochastic; smoothing 1 gives the fast one).
-  Panes stack as price, RSI, Stochastic, volume, and the price chart gives up the space they use.
+  **Stochastic RSI** (`StochRSI` button, off by default): where Wilder's RSI sits between its own lowest and highest value
+  over a lookback, with %K and %D smoothing; defaults 14, 14, 3, 3. It has its own pane between the price chart and
+  the volume bars, fixed 0–100 scale with the 20/80 levels, values in the pane label and the crosshair axis.
   **Fibonacci retracement** (`Fib` button): choose *Draw retracement*, then click the start and the end of a move
   (Esc cancels). Levels 0, 0.236, 0.382, 0.5, 0.618, 0.786 and 1 are drawn from the earlier point to the right edge,
   with optional extensions (1.272, 1.618, 2.618). Anchors are snapped to candles and stored as time + price, so they
@@ -66,7 +64,7 @@ src/lib/trading/
   binance.ts                        Binance REST + WebSocket feed (history, depth, live candles)
   timeframes.ts                     timeframes, candle aggregation/folding, time formatting
   chartview.ts                      chart zoom/scroll math
-  indicators.ts                     SMA/EMA, Bollinger Bands, RSI, Stochastic and their settings
+  indicators.ts                     SMA/EMA, Bollinger Bands, Stochastic RSI (and the RSI it is built on) and their settings
   fib.ts                            Fibonacci levels, time/price anchors, hit-testing, per-symbol storage
   liquidations.ts                   estimated liquidation heatmap model (position inflow, levels, consumption, grid)
   slippage.ts                       pre-trade slippage analysis
@@ -80,7 +78,7 @@ e2e/                                Playwright browser tests + the mocked Binanc
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+timeframes, Fibonacci levels and time/index mapping, the liquidation model (against a naive reference), moving averages, Bollinger Bands, RSI and Stochastic RSI (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
 
 ### Browser tests (Playwright)
@@ -100,8 +98,7 @@ its order book is flat and every minute trades the same volume, which lets the t
 | `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
 | `chart-liquidation` | heatmap from volume and from open interest, exact levels and consumption times, fallback, fetch frequency |
 | `chart-fibonacci` | placing with two clicks, exact levels, anchoring through zoom/timeframes, dragging, persistence per symbol, limits |
-| `chart-stochastic` | exact %K/%D on a zigzag history, stacking with RSI and volume, inputs, persistence, popovers |
-| `chart-rsi` | exact Wilder values on a zigzag history, pane layout with volume, period input, persistence |
+| `chart-stochrsi` | exact %K/%D against an independent calculation, pane layout with volume, the four inputs, persistence, popovers |
 | `chart-bollinger` | band values (exact, on a ramp history), legend, period/multiplier input, persistence, short history |
 | `chart-indicators` | moving-average values (exact, on a ramp history), legend, popover, persistence, short history |
 | `chart-volume` | volume pane scale, bar proportions measured from canvas pixels, toggle, higher-timeframe volume |

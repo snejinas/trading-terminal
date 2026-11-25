@@ -216,8 +216,8 @@ test.describe("Fibonacci retracement on a rising ramp", () => {
   });
 
   test("it works next to the other indicator panels, which are exclusive with it", async ({ page }) => {
-    await page.getByRole("button", { name: "RSI", exact: true }).click();
-    await page.getByRole("checkbox", { name: "Show RSI" }).check();
+    await page.getByRole("button", { name: "Stochastic RSI", exact: true }).click();
+    await page.getByRole("checkbox", { name: "Show Stochastic RSI" }).check();
     await page.keyboard.press("Escape");
     await place(page, [60, BASE - 70], [10, BASE - 10]); // the price pane is smaller now
     expect((await chartFib(page)).items).toHaveLength(1);

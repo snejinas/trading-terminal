@@ -127,10 +127,10 @@ test.describe("heatmap from volume (the futures host is unreachable)", () => {
     expect((await chartLiq(page))!.mode).toBe("volume");
   });
 
-  test("it coexists with the oscillator panes (the heat stays in the price pane)", async ({ page }) => {
+  test("it coexists with the Stochastic RSI pane (the heat stays in the price pane)", async ({ page }) => {
     await turnOn(page);
-    await page.getByRole("button", { name: "RSI", exact: true }).click();
-    await page.getByRole("checkbox", { name: "Show RSI" }).check();
+    await page.getByRole("button", { name: "Stochastic RSI", exact: true }).click();
+    await page.getByRole("checkbox", { name: "Show Stochastic RSI" }).check();
     await page.keyboard.press("Escape");
     const s = (await chartLiq(page))!;
     expect(s.max).toBeGreaterThan(0);

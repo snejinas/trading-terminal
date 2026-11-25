@@ -110,36 +110,24 @@ export const chartBb = (page: Page): Promise<BbReading | null> =>
     return s ? JSON.parse(s) : null;
   });
 
-export interface RsiReading {
-  label: string;
-  value: number | null;
-}
-
-/** The RSI pane's label as drawn (null while the pane is off). */
-export const chartRsi = (page: Page): Promise<RsiReading | null> =>
-  chartCanvas(page).evaluate((c) => {
-    const s = (c as HTMLCanvasElement).dataset.rsi;
-    return s ? JSON.parse(s) : null;
-  });
-
-/** Heights (css px) of the RSI pane and of the price pane above it. */
-export const paneHeights = (page: Page): Promise<{ rsih: number; stochh: number; priceh: number; volh: number }> =>
-  chartCanvas(page).evaluate((c) => {
-    const d = (c as HTMLCanvasElement).dataset;
-    return { rsih: Number(d.rsih), stochh: Number(d.stochh), priceh: Number(d.priceh), volh: Number(d.volh) };
-  });
-
-export interface StochReading {
+export interface StochRsiReading {
   label: string;
   k: number | null;
   d: number | null;
 }
 
-/** The Stochastic pane's label as drawn (null while the pane is off). */
-export const chartStoch = (page: Page): Promise<StochReading | null> =>
+/** The Stochastic RSI pane's label as drawn (null while the pane is off). */
+export const chartStochRsi = (page: Page): Promise<StochRsiReading | null> =>
   chartCanvas(page).evaluate((c) => {
-    const s = (c as HTMLCanvasElement).dataset.stoch;
+    const s = (c as HTMLCanvasElement).dataset.stochrsi;
     return s ? JSON.parse(s) : null;
+  });
+
+/** Heights (css px) of the oscillator pane, the price pane above it and the volume pane below. */
+export const paneHeights = (page: Page): Promise<{ osch: number; priceh: number; volh: number }> =>
+  chartCanvas(page).evaluate((c) => {
+    const d = (c as HTMLCanvasElement).dataset;
+    return { osch: Number(d.osch), priceh: Number(d.priceh), volh: Number(d.volh) };
   });
 
 export interface FibLevel {
