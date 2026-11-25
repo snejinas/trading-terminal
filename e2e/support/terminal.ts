@@ -141,3 +141,64 @@ export const chartStoch = (page: Page): Promise<StochReading | null> =>
     const s = (c as HTMLCanvasElement).dataset.stoch;
     return s ? JSON.parse(s) : null;
   });
+
+export interface FibLevel {
+  r: number;
+  price: number;
+  y: number;
+}
+export interface FibItem {
+  id: string;
+  a: { t: number; p: number };
+  b: { t: number; p: number };
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  levels: FibLevel[];
+}
+export interface FibState {
+  step: number;
+  ext: boolean;
+  items: FibItem[];
+}
+
+/** The Fibonacci retracements as drawn (positions in canvas css pixels). */
+export const chartFib = (page: Page): Promise<FibState> =>
+  chartCanvas(page).evaluate((c) => JSON.parse((c as HTMLCanvasElement).dataset.fib || '{"step":0,"ext":false,"items":[]}'));
+
+/** The price scale of the price pane: price <-> canvas y. */
+export async function priceScale(page: Page) {
+  const d = await chartCanvas(page).evaluate((c) => {
+    const ds = (c as HTMLCanvasElement).dataset;
+    return { hi: Number(ds.hi), lo: Number(ds.lo), priceh: Number(ds.priceh) };
+  });
+  const pad = 12;
+  return {
+    ...d,
+    yOf: (p: number) => pad + ((d.hi - p) / (d.hi - d.lo)) * (d.priceh - pad),
+    priceOf: (y: number) => d.hi - ((y - pad) / (d.priceh - pad)) * (d.hi - d.lo),
+    perPixel: (d.hi - d.lo) / (d.priceh - pad),
+  };
+}
+
+/** Page coordinates of a candle (`back` candles before the newest) at a price. */
+export async function pointAt(page: Page, back: number, price: number): Promise<{ x: number; y: number }> {
+  const box = (await chartCanvas(page).boundingBox())!;
+  const s = await chartState(page);
+  const sc = await priceScale(page);
+  const step = (box.width - 84) / s.count;
+  return { x: box.x + (s.loaded - 1 - back - s.start + 0.5) * step, y: box.y + sc.yOf(price) };
+}
+
+/** RGB of the canvas pixel at a css position inside the canvas. */
+export const pixelAt = (page: Page, x: number, y: number): Promise<[number, number, number]> =>
+  chartCanvas(page).evaluate(
+    (el, [px, py]) => {
+      const c = el as HTMLCanvasElement;
+      const dpr = window.devicePixelRatio || 1;
+      const d = c.getContext("2d")!.getImageData(Math.round(px * dpr), Math.round(py * dpr), 1, 1).data;
+      return [d[0], d[1], d[2]] as [number, number, number];
+    },
+    [x, y]
+  );

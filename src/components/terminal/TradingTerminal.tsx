@@ -11,6 +11,22 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  FIB_MAX_PER_SYMBOL,
+  fibColor,
+  fibLevels,
+  levelPrice,
+  loadFibExtensions,
+  loadFibs,
+  nearestHandle,
+  newFibId,
+  saveFibExtensions,
+  saveFibs,
+  snapTime,
+  timeToIndex,
+  type Fib,
+  type FibPoint,
+} from "@/lib/trading/fib";
+import {
   STOCH_D_COLOR,
   STOCH_K_COLOR,
   STOCH_MAX_K,
@@ -90,6 +106,7 @@ import {
   Market,
   START_CASH,
   sweep,
+  type Candle,
   type Fill,
   type Feed,
   dpFor,
@@ -224,7 +241,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const volOn = useRef(volShown);
   const [maCfg, setMaCfg] = useState<MaSlot[]>(loadMaConfig); // moving averages (remembered)
   const maRef = useRef(maCfg);
-  const [panel, setPanel] = useState<"ma" | "bb" | "rsi" | "stoch" | null>(null); // which indicator popover is open
+  const [panel, setPanel] = useState<"ma" | "bb" | "rsi" | "stoch" | "fib" | null>(null); // which indicator popover is open
   const [bbCfg, setBbCfg] = useState<BbConfig>(loadBbConfig); // Bollinger Bands (remembered)
   const bbRef = useRef(bbCfg);
   const bbCache = useRef<{ key: string; bands: Bands } | null>(null);
@@ -232,6 +249,17 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const rsiRef = useRef(rsiCfg);
   const [stochCfg, setStochCfg] = useState<StochConfig>(loadStochConfig); // Stochastic pane (remembered)
   const stochRef = useRef(stochCfg);
+  // Fibonacci retracements (per symbol, remembered): placed with two clicks, anchors live in (time, price)
+  const [fibs, setFibs] = useState<Fib[]>([]);
+  const fibsRef = useRef<Fib[]>([]);
+  const [fibExt, setFibExt] = useState(loadFibExtensions);
+  const fibExtRef = useRef(fibExt);
+  const [fibStep, setFibStep] = useState<0 | 1 | 2>(0); // 0 idle, 1 waiting for the first point, 2 for the second
+  const fibStepRef = useRef<0 | 1 | 2>(0);
+  const pendingA = useRef<FibPoint | null>(null);
+  const fibDrag = useRef<{ id: string; which: "a" | "b" } | null>(null);
+  const lastFibAction = useRef(0);
+  const geo = useRef<{ hi: number; lo: number; pad: number; priceBottom: number; start: number; step: number; plotW: number; all: Candle[]; tfMs: number } | null>(null);
   const stochCache = useRef<{ key: string; k: (number | null)[]; d: (number | null)[] } | null>(null);
   const rsiCache = useRef<{ key: string; values: (number | null)[] } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
@@ -386,6 +414,9 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     lo -= margin;
     hi += margin;
     const y = (p: number) => pad + ((hi - p) / (hi - lo)) * (priceBottom - pad);
+    geo.current = { hi, lo, pad, priceBottom, start, step, plotW, all, tfMs };
+    cv.dataset.hi = String(hi);
+    cv.dataset.lo = String(lo);
 
     // last price geometry (the label is pinned to the plot edge when the price is off screen)
     const lastC = all[all.length - 1];
@@ -507,6 +538,87 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.stroke();
     });
     ctx.restore();
+
+    // Fibonacci retracements (and the one being placed), clipped to the price pane
+    {
+      const ext = fibExtRef.current;
+      const levels = fibLevels(ext);
+      const drawFib = (f: Pick<Fib, "a" | "b">, alpha: number, handles: boolean) => {
+        const xA = xOf(timeToIndex(all, f.a.t, tfMs));
+        const xB = xOf(timeToIndex(all, f.b.t, tfMs));
+        const left = Math.min(xA, xB);
+        ctx.globalAlpha = alpha;
+        const ys = levels.map((r) => y(levelPrice(f, r)));
+        for (let i = 0; i + 1 < levels.length && levels[i + 1] <= 1; i++) {
+          ctx.fillStyle = fibColor(levels[i + 1]);
+          ctx.globalAlpha = alpha * 0.07;
+          ctx.fillRect(left, Math.min(ys[i], ys[i + 1]), plotW - left, Math.abs(ys[i + 1] - ys[i]));
+        }
+        ctx.globalAlpha = alpha;
+        ctx.lineWidth = 1;
+        levels.forEach((r, i) => {
+          const yy = Math.round(ys[i]) + 0.5;
+          ctx.strokeStyle = ctx.fillStyle = fibColor(r);
+          ctx.beginPath();
+          ctx.moveTo(left, yy);
+          ctx.lineTo(plotW, yy);
+          ctx.stroke();
+          ctx.fillText(`${r} (${fmt(levelPrice(f, r), dp)})`, Math.max(left, 0) + 5, yy - 7);
+        });
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(255,255,255,0.55)";
+        ctx.beginPath();
+        ctx.moveTo(xA, y(f.a.p));
+        ctx.lineTo(xB, y(f.b.p));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (handles) {
+          for (const [hx, hy] of [[xA, y(f.a.p)], [xB, y(f.b.p)]]) {
+            ctx.beginPath();
+            ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+            ctx.fillStyle = "#0b0e14";
+            ctx.fill();
+            ctx.strokeStyle = "#e6eaf2";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+        ctx.globalAlpha = 1;
+      };
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, plotW, priceBottom);
+      ctx.clip();
+      for (const f of fibsRef.current) drawFib(f, 0.9, true);
+      // placement preview: the first point, and the retracement following the cursor once there is one
+      const a0 = pendingA.current;
+      if (fibStepRef.current === 2 && a0) {
+        const pm = mouse.current;
+        if (pm && pm.x < plotW && pm.y < priceBottom) {
+          const b0 = { t: snapTime(all, pm.x / step + start - 0.5, tfMs), p: hi - ((pm.y - pad) / (priceBottom - pad)) * (hi - lo) };
+          drawFib({ a: a0, b: b0 }, 0.6, false);
+        }
+        ctx.beginPath();
+        ctx.arc(xOf(timeToIndex(all, a0.t, tfMs)), y(a0.p), 4, 0, Math.PI * 2);
+        ctx.fillStyle = "#e6eaf2";
+        ctx.fill();
+      }
+      ctx.restore();
+      cv.dataset.fib = JSON.stringify({
+        step: fibStepRef.current,
+        ext,
+        items: fibsRef.current.map((f) => ({
+          id: f.id,
+          a: f.a,
+          b: f.b,
+          ax: xOf(timeToIndex(all, f.a.t, tfMs)),
+          ay: y(f.a.p),
+          bx: xOf(timeToIndex(all, f.b.t, tfMs)),
+          by: y(f.b.p),
+          levels: levels.map((r) => ({ r, price: levelPrice(f, r), y: y(levelPrice(f, r)) })),
+        })),
+      });
+    }
 
     // RSI pane: fixed 0-100 scale with the 30 / 70 levels
     if (rsiVals) {
@@ -861,6 +973,41 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     drawRef.current();
   }, []);
 
+  // each symbol has its own retracements; switching symbol also abandons a half-placed one
+  useEffect(() => {
+    const list = loadFibs(sym);
+    fibsRef.current = list;
+    setFibs(list);
+    fibStepRef.current = 0;
+    pendingA.current = null;
+    setFibStep(0);
+    fibDrag.current = null;
+    drawRef.current();
+  }, [sym]);
+  const setFibList = useCallback(
+    (list: Fib[]) => {
+      fibsRef.current = list;
+      setFibs(list);
+      saveFibs(sym, list);
+      drawRef.current();
+    },
+    [sym]
+  );
+  const startFib = useCallback((step: 0 | 1 | 2) => {
+    fibStepRef.current = step;
+    setFibStep(step);
+    if (step === 0) pendingA.current = null;
+    drawRef.current();
+  }, []);
+  useEffect(() => {
+    if (fibStep === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") startFib(0);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [fibStep, startFib]);
+
   // changing symbol or timeframe returns to the live edge (the zoom level is kept)
   useEffect(() => {
     view.current.offset = 0;
@@ -899,8 +1046,68 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   }, [geom, panBy, zoomBy]);
 
   // ── pointer input: one pointer pans, two pinch-zoom ──
+  /** Pixel position (canvas coordinates) -> the (candle time, price) it stands for, using the last drawn geometry. */
+  const toFibPoint = (x: number, yPx: number): FibPoint | null => {
+    const g = geo.current;
+    if (!g) return null;
+    return { t: snapTime(g.all, x / g.step + g.start - 0.5, g.tfMs), p: g.hi - ((yPx - g.pad) / (g.priceBottom - g.pad)) * (g.hi - g.lo) };
+  };
+  const fibHandles = () => {
+    const g = geo.current;
+    if (!g) return [];
+    const out: { id: string; which: "a" | "b"; x: number; y: number }[] = [];
+    for (const f of fibsRef.current) {
+      for (const which of ["a", "b"] as const) {
+        const pt = f[which];
+        out.push({
+          id: f.id,
+          which,
+          x: (timeToIndex(g.all, pt.t, g.tfMs) - g.start + 0.5) * g.step,
+          y: g.pad + ((g.hi - pt.p) / (g.hi - g.lo)) * (g.priceBottom - g.pad),
+        });
+      }
+    }
+    return out;
+  };
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    {
+      // Fibonacci: placing a point, or grabbing an anchor, takes precedence over panning
+      const r = e.currentTarget.getBoundingClientRect();
+      const lx = e.clientX - r.left;
+      const ly = e.clientY - r.top;
+      const g = geo.current;
+      if (g && lx < g.plotW && ly < g.priceBottom) {
+        if (fibStepRef.current > 0) {
+          const pt = toFibPoint(lx, ly);
+          lastFibAction.current = Date.now();
+          if (pt && fibStepRef.current === 1) {
+            pendingA.current = pt;
+            startFib(2);
+          } else if (pt && pendingA.current) {
+            const a = pendingA.current;
+            if (a.t !== pt.t || a.p !== pt.p) {
+              setFibList([...fibsRef.current, { id: newFibId(), a, b: pt }]);
+              startFib(0);
+              setPanel(null);
+            }
+          }
+          return;
+        }
+        const h = nearestHandle(fibHandles(), lx, ly, e.pointerType === "mouse" ? 9 : 16);
+        if (h) {
+          fibDrag.current = { id: h.id, which: h.which };
+          lastFibAction.current = Date.now();
+          try {
+            e.currentTarget.setPointerCapture(e.pointerId);
+          } catch {
+            /* synthetic pointer: dragging still works while over the canvas */
+          }
+          e.currentTarget.style.cursor = "move";
+          return;
+        }
+      }
+    }
     try {
       e.currentTarget.setPointerCapture(e.pointerId); // keeps the drag going outside the canvas
     } catch {
@@ -913,6 +1120,25 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
     if (e.pointerType === "mouse") mouse.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+    const drag = fibDrag.current;
+    if (drag) {
+      const pt = toFibPoint(e.clientX - r.left, e.clientY - r.top);
+      const g = geo.current;
+      if (pt && g) {
+        const py = Math.min(Math.max(e.clientY - r.top, g.pad), g.priceBottom);
+        const clamped = toFibPoint(e.clientX - r.left, py)!;
+        fibsRef.current = fibsRef.current.map((f) => (f.id === drag.id ? { ...f, [drag.which]: clamped } : f));
+      }
+      drawRef.current();
+      return;
+    }
+    if (pointers.current.size === 0) {
+      const g = geo.current;
+      const lx = e.clientX - r.left;
+      const ly = e.clientY - r.top;
+      const inPane = !!g && lx < g.plotW && ly < g.priceBottom;
+      e.currentTarget.style.cursor = fibStepRef.current > 0 && inPane ? "crosshair" : inPane && nearestHandle(fibHandles(), lx, ly, 9) ? "move" : "";
+    }
     const prev = pointers.current.get(e.pointerId);
     if (prev) {
       const g = geom();
@@ -929,6 +1155,12 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     drawRef.current();
   };
   const onPointerEnd = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (fibDrag.current) {
+      fibDrag.current = null;
+      setFibList(fibsRef.current); // keep and save where the anchor was dropped
+      e.currentTarget.style.cursor = "";
+      return;
+    }
     pointers.current.delete(e.pointerId);
     if (pointers.current.size === 0) e.currentTarget.style.cursor = "";
   };
@@ -983,9 +1215,17 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
             drawRef.current();
           }
         }}
-        onDoubleClick={reset}
+        onDoubleClick={() => {
+          if (Date.now() - lastFibAction.current < 500) return; // the clicks of a placement are not a reset
+          reset();
+        }}
         onKeyDown={onKeyDown}
       />
+      {fibStep > 0 && (
+        <div role="status" className="pointer-events-none absolute left-1/2 top-12 -translate-x-1/2 rounded border border-white/15 bg-[#10141c]/95 px-3 py-1 text-xs text-slate-200">
+          {fibStep === 1 ? "Click the start of the move" : "Click the end of the move"} · Esc to cancel
+        </div>
+      )}
       <div ref={controls} className="absolute right-[84px] top-1.5 text-xs">
       <div className="flex items-center justify-end gap-1">
         {scrolled && (
@@ -1042,6 +1282,16 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
         >
           Stoch
         </button>
+        <button
+          aria-label="Fibonacci retracement"
+          aria-pressed={fibs.length > 0 || fibStep > 0}
+          aria-expanded={panel === "fib"}
+          title="Fibonacci retracement"
+          onClick={() => setPanel((p) => (p === "fib" ? null : "fib"))}
+          className={`${btn} ${fibs.length > 0 || fibStep > 0 ? "text-white" : "text-slate-500"}`}
+        >
+          Fib
+        </button>
         <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1.25)} className={btn}>
           −
         </button>
@@ -1054,6 +1304,54 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           </button>
         )}
       </div>
+      {panel === "fib" && (
+        <div role="dialog" aria-label="Fibonacci retracement" className="mt-1 w-64 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
+          <button
+            aria-label="Draw retracement"
+            disabled={fibs.length >= FIB_MAX_PER_SYMBOL}
+            onClick={() => {
+              startFib(1);
+              setPanel(null);
+            }}
+            className="mb-1 w-full rounded bg-[#26d07c] px-2 py-1 font-bold text-[#0b0e14] disabled:opacity-40"
+          >
+            {fibs.length >= FIB_MAX_PER_SYMBOL ? `Limit of ${FIB_MAX_PER_SYMBOL} reached` : "Draw retracement"}
+          </button>
+          <label className="flex items-center gap-2 py-0.5">
+            <input
+              type="checkbox"
+              aria-label="Show extensions"
+              checked={fibExt}
+              onChange={(e) => {
+                fibExtRef.current = e.target.checked;
+                setFibExt(e.target.checked);
+                saveFibExtensions(e.target.checked);
+                drawRef.current();
+              }}
+            />
+            <span className="text-slate-200">Extensions (1.272, 1.618, 2.618)</span>
+          </label>
+          {fibs.length === 0 ? (
+            <div className="py-1 text-slate-500">None on {sym}. Pick two points on the chart.</div>
+          ) : (
+            <div className="mt-1 border-t border-white/10 pt-1">
+              {fibs.map((f, i) => (
+                <div key={f.id} className="flex items-center justify-between gap-2 py-0.5 text-slate-300">
+                  <span>
+                    {i + 1}. {fmt(f.a.p, dpFor(sym))} → {fmt(f.b.p, dpFor(sym))}
+                  </span>
+                  <button aria-label={`Delete retracement ${i + 1}`} title="Delete" onClick={() => setFibList(fibs.filter((x) => x.id !== f.id))} className="rounded px-1 text-slate-400 hover:bg-white/10 hover:text-white">
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button aria-label="Clear all retracements" onClick={() => setFibList([])} className="mt-1 text-slate-400 underline hover:text-white">
+                Clear all
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {panel === "stoch" && (
         <div role="dialog" aria-label="Stochastic" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
           <label className="flex items-center gap-2 py-0.5">

@@ -35,6 +35,11 @@ Other scripts: `npm run typecheck`, `npm test`.
   **Stochastic** (`Stoch` button, off by default): %K (lookback 2–200, smoothing 1–50) and %D (1–50) in a pane of
   their own with the 20/80 levels; defaults 14,3,3 (the "slow" stochastic; smoothing 1 gives the fast one).
   Panes stack as price, RSI, Stochastic, volume, and the price chart gives up the space they use.
+  **Fibonacci retracement** (`Fib` button): choose *Draw retracement*, then click the start and the end of a move
+  (Esc cancels). Levels 0, 0.236, 0.382, 0.5, 0.618, 0.786 and 1 are drawn from the earlier point to the right edge,
+  with optional extensions (1.272, 1.618, 2.618). Anchors are snapped to candles and stored as time + price, so they
+  stay put through zoom, scroll and timeframe changes; drag an anchor to adjust it, delete from the popover.
+  Up to 20 per symbol, remembered per symbol.
 - **Paper account** ($100k): market and limit orders, positions, working orders, fills, P&L.
 - **Realistic fills**: market and marketable-limit orders *walk the order book* level by level and fill at the
   volume-weighted price. Your own fills deplete the book and it recovers over time (5 s half-life).
@@ -57,6 +62,7 @@ src/lib/trading/
   timeframes.ts                     timeframes, candle aggregation/folding, time formatting
   chartview.ts                      chart zoom/scroll math
   indicators.ts                     SMA/EMA, Bollinger Bands, RSI, Stochastic and their settings
+  fib.ts                            Fibonacci levels, time/price anchors, hit-testing, per-symbol storage
   slippage.ts                       pre-trade slippage analysis
   fees.ts                           fee tiers and settings
   backup.ts / storage.ts            account export/import and browser persistence
@@ -68,7 +74,7 @@ e2e/                                Playwright browser tests + the mocked Binanc
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, moving averages, Bollinger Bands, RSI and Stochastic (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+timeframes, Fibonacci levels and time/index mapping, moving averages, Bollinger Bands, RSI and Stochastic (against naive references, plus a hand-checked textbook example, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
 
 ### Browser tests (Playwright)
@@ -86,6 +92,7 @@ its order book is flat and every minute trades the same volume, which lets the t
 | --- | --- |
 | `chart-interaction` | wheel/drag/pinch/keyboard zoom and scroll, older-history paging, staying anchored to live candles |
 | `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
+| `chart-fibonacci` | placing with two clicks, exact levels, anchoring through zoom/timeframes, dragging, persistence per symbol, limits |
 | `chart-stochastic` | exact %K/%D on a zigzag history, stacking with RSI and volume, inputs, persistence, popovers |
 | `chart-rsi` | exact Wilder values on a zigzag history, pane layout with volume, period input, persistence |
 | `chart-bollinger` | band values (exact, on a ramp history), legend, period/multiplier input, persistence, short history |
