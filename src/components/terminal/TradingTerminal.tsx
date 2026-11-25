@@ -11,10 +11,20 @@ import {
 } from "react";
 import { BinanceMarket } from "@/lib/trading/binance";
 import {
+  BB_COLOR,
+  BB_FILL,
+  BB_MAX_MULT,
+  BB_MIN_MULT,
   MA_COLORS,
   MA_MAX_PERIOD,
   MA_MIN_PERIOD,
+  bbLabel,
+  bollingerOf,
   computeMovingAverages,
+  loadBbConfig,
+  saveBbConfig,
+  type BbConfig,
+  type Bands,
   loadMaConfig,
   maLabel,
   saveMaConfig,
@@ -95,6 +105,49 @@ const PAD = 12; // top padding inside the plot
 const UP_DIM = "rgba(38, 208, 124, 0.45)"; // volume bars: the candle colours, softened
 const DOWN_DIM = "rgba(255, 91, 110, 0.45)";
 
+function NumField({
+  label,
+  text,
+  value,
+  min,
+  max,
+  integer,
+  onCommit,
+}: {
+  label: string;
+  text: string;
+  value: number;
+  min: number;
+  max: number;
+  integer?: boolean;
+  onCommit: (v: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const parse = (t: string) => {
+    const v = Number(t);
+    return t.trim() !== "" && Number.isFinite(v) && v >= min && v <= max && (!integer || Number.isInteger(v)) ? v : null;
+  };
+  return (
+    <label className="flex items-center justify-between gap-2 py-0.5">
+      <span className="text-slate-400">{text}</span>
+      <input
+        inputMode="decimal"
+        aria-label={label}
+        aria-invalid={parse(draft) === null}
+        value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const v = parse(e.target.value);
+          if (v !== null) onCommit(v);
+        }}
+        onBlur={() => setDraft(String(value))}
+        className={`w-16 rounded border bg-[#0b0e14] px-1 py-0.5 text-right text-slate-200 ${parse(draft) === null ? "border-red-500" : "border-white/15"}`}
+      />
+    </label>
+  );
+}
+
 function MaRow({ index, slot, onChange }: { index: number; slot: MaSlot; onChange: (s: MaSlot) => void }) {
   const [draft, setDraft] = useState(String(slot.period));
   useEffect(() => setDraft(String(slot.period)), [slot.period]);
@@ -151,6 +204,10 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
   const [maCfg, setMaCfg] = useState<MaSlot[]>(loadMaConfig); // moving averages (remembered)
   const maRef = useRef(maCfg);
   const [maOpen, setMaOpen] = useState(false);
+  const [bbCfg, setBbCfg] = useState<BbConfig>(loadBbConfig); // Bollinger Bands (remembered)
+  const bbRef = useRef(bbCfg);
+  const [bbOpen, setBbOpen] = useState(false);
+  const bbCache = useRef<{ key: string; bands: Bands } | null>(null);
   const maCache = useRef<{ key: string; series: ((number | null)[] | null)[] } | null>(null);
   const controls = useRef<HTMLDivElement>(null);
 
@@ -213,6 +270,13 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     const maKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${JSON.stringify(cfg)}`;
     if (maCache.current?.key !== maKey) maCache.current = { key: maKey, series: computeMovingAverages(all, cfg) };
     const maSeries = maCache.current.series;
+    const bb = bbRef.current;
+    let bands: Bands | null = null;
+    if (bb.enabled) {
+      const bbKey = `${sym}|${tf}|${all.length}|${all[0].t}|${newest}|${all[all.length - 1].c}|${bb.period}|${bb.mult}`;
+      if (bbCache.current?.key !== bbKey) bbCache.current = { key: bbKey, bands: bollingerOf(all, bb) };
+      bands = bbCache.current.bands;
+    }
 
     // ── panes: price on top, volume underneath (only when the visible candles carry volume) ──
     const hasVol = volOn.current && data.some((c) => c.v !== undefined);
@@ -317,6 +381,47 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     ctx.lineWidth = 1.5;
     ctx.lineJoin = "round";
     const lastIdx = Math.min(all.length, Math.ceil(start + count) + 1);
+    if (bands) {
+      const from = Math.max(0, first - 1);
+      // translucent fill between the bands, one polygon per unbroken run
+      ctx.fillStyle = BB_FILL;
+      for (let k = from; k < lastIdx; ) {
+        if (bands.upper[k] === null) {
+          k++;
+          continue;
+        }
+        let e = k;
+        while (e + 1 < lastIdx && bands.upper[e + 1] !== null) e++;
+        ctx.beginPath();
+        for (let j = k; j <= e; j++) (j === k ? ctx.moveTo : ctx.lineTo).call(ctx, xOf(j), y(bands.upper[j]!));
+        for (let j = e; j >= k; j--) ctx.lineTo(xOf(j), y(bands.lower[j]!));
+        ctx.closePath();
+        ctx.fill();
+        k = e + 1;
+      }
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = BB_COLOR;
+      for (const [ser, dash] of [[bands.upper, false], [bands.mid, true], [bands.lower, false]] as const) {
+        ctx.setLineDash(dash ? [4, 3] : []);
+        ctx.beginPath();
+        let pen = false;
+        for (let k = from; k < lastIdx; k++) {
+          const val = ser[k];
+          if (val === null) {
+            pen = false;
+            continue;
+          }
+          if (pen) ctx.lineTo(xOf(k), y(val));
+          else {
+            ctx.moveTo(xOf(k), y(val));
+            pen = true;
+          }
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1.5;
+    }
     maSeries.forEach((ser, si) => {
       if (!ser) return;
       ctx.strokeStyle = MA_COLORS[si];
@@ -371,7 +476,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       ctx.setLineDash([]);
       ctx.fillStyle = "#7d8799";
       ctx.textAlign = "right";
-      ctx.fillText("start of history", x0 - 6, 46);
+      ctx.fillText("start of history", x0 - 6, 62);
       ctx.textAlign = "left";
     }
 
@@ -392,7 +497,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
 
     if (older.current.loading) {
       ctx.fillStyle = "#7d8799";
-      ctx.fillText("loading history…", 10, 46);
+      ctx.fillText("loading history…", 10, 62);
     }
 
     // moving-average legend: the value under the cursor, else at the newest visible candle
@@ -420,6 +525,26 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           ctx.fillText(it.text, x, 30);
           x += ctx.measureText(it.text).width + 14;
         }
+      }
+    }
+
+    // Bollinger legend (second row): upper / middle / lower at the same candle as the averages
+    {
+      const hm = mouse.current;
+      const hIdx = hm && hm.x < plotW && hm.y < plotH ? Math.floor(hm.x / step + start) : -1;
+      const at = hIdx >= 0 && hIdx < all.length ? hIdx : Math.min(all.length, Math.ceil(start + count)) - 1;
+      if (bands) {
+        const u = bands.upper[at] ?? null;
+        const mi = bands.mid[at] ?? null;
+        const lo2 = bands.lower[at] ?? null;
+        cv.dataset.bb = JSON.stringify({ label: bbLabel(bb), upper: u, mid: mi, lower: lo2 });
+        const txt = `${bbLabel(bb)}  U ${u === null ? "—" : fmt(u, dp)}  M ${mi === null ? "—" : fmt(mi, dp)}  L ${lo2 === null ? "—" : fmt(lo2, dp)}`;
+        ctx.fillStyle = "rgba(11,14,20,0.6)";
+        ctx.fillRect(4, 38, ctx.measureText(txt).width + 12, 16);
+        ctx.fillStyle = BB_COLOR;
+        ctx.fillText(txt, 10, 46);
+      } else {
+        cv.dataset.bb = "";
       }
     }
 
@@ -510,14 +635,26 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
     saveMaConfig(next);
     drawRef.current();
   }, []);
-  // the moving-average popover closes on Escape or a click outside it
+  const updateBb = useCallback((next: BbConfig) => {
+    bbRef.current = next;
+    setBbCfg(next);
+    saveBbConfig(next);
+    drawRef.current();
+  }, []);
+  // the indicator popovers close on Escape or a click outside them
   useEffect(() => {
-    if (!maOpen) return;
+    if (!maOpen && !bbOpen) return;
     const onDown = (e: PointerEvent) => {
-      if (controls.current && !controls.current.contains(e.target as Node)) setMaOpen(false);
+      if (controls.current && !controls.current.contains(e.target as Node)) {
+        setMaOpen(false);
+        setBbOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMaOpen(false);
+      if (e.key === "Escape") {
+        setMaOpen(false);
+        setBbOpen(false);
+      }
     };
     document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
@@ -525,7 +662,7 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [maOpen]);
+  }, [maOpen, bbOpen]);
   const toggleVol = useCallback(() => {
     const next = !volOn.current;
     volOn.current = next;
@@ -680,10 +817,26 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           aria-pressed={maCfg.some((s) => s.enabled)}
           aria-expanded={maOpen}
           title="Moving averages"
-          onClick={() => setMaOpen((o) => !o)}
+          onClick={() => {
+            setMaOpen((o) => !o);
+            setBbOpen(false);
+          }}
           className={`${btn} ${maCfg.some((s) => s.enabled) ? "text-white" : "text-slate-500"}`}
         >
           MA
+        </button>
+        <button
+          aria-label="Bollinger Bands"
+          aria-pressed={bbCfg.enabled}
+          aria-expanded={bbOpen}
+          title="Bollinger Bands"
+          onClick={() => {
+            setBbOpen((o) => !o);
+            setMaOpen(false);
+          }}
+          className={`${btn} ${bbCfg.enabled ? "text-white" : "text-slate-500"}`}
+        >
+          BB
         </button>
         <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1.25)} className={btn}>
           −
@@ -697,6 +850,17 @@ function Chart({ market, sym, tf, loading }: { market: Feed; sym: string; tf: st
           </button>
         )}
       </div>
+      {bbOpen && (
+        <div role="dialog" aria-label="Bollinger Bands" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
+          <label className="flex items-center gap-2 py-0.5">
+            <input type="checkbox" aria-label="Show Bollinger Bands" checked={bbCfg.enabled} onChange={(e) => updateBb({ ...bbCfg, enabled: e.target.checked })} />
+            <span className="inline-block h-0.5 w-3" style={{ background: BB_COLOR }} />
+            <span className="text-slate-200">Bollinger Bands</span>
+          </label>
+          <NumField label="Bollinger period" text="Period" value={bbCfg.period} min={MA_MIN_PERIOD} max={MA_MAX_PERIOD} integer onCommit={(v) => updateBb({ ...bbCfg, period: v })} />
+          <NumField label="Bollinger multiplier" text="Std devs" value={bbCfg.mult} min={BB_MIN_MULT} max={BB_MAX_MULT} onCommit={(v) => updateBb({ ...bbCfg, mult: v })} />
+        </div>
+      )}
       {maOpen && (
         <div role="dialog" aria-label="Moving averages" className="mt-1 w-56 rounded border border-white/15 bg-[#10141c] p-2 shadow-lg">
           {maCfg.map((slot, i) => (

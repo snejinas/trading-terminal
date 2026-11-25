@@ -95,3 +95,17 @@ export async function hoverCandle(page: Page, back: number, y = 140): Promise<vo
   const step = (box.width - 84) / s.count;
   await page.mouse.move(box.x + (s.loaded - 1 - back - s.start + 0.5) * step, box.y + y);
 }
+
+export interface BbReading {
+  label: string;
+  upper: number | null;
+  mid: number | null;
+  lower: number | null;
+}
+
+/** The Bollinger legend as drawn (null while the bands are off). */
+export const chartBb = (page: Page): Promise<BbReading | null> =>
+  chartCanvas(page).evaluate((c) => {
+    const s = (c as HTMLCanvasElement).dataset.bb;
+    return s ? JSON.parse(s) : null;
+  });

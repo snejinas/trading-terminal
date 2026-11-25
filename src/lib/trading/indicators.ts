@@ -104,3 +104,79 @@ export function saveMaConfig(slots: MaSlot[]): void {
     /* storage may be blocked; the setting just won't be remembered */
   }
 }
+
+// ───────── Bollinger Bands ─────────
+export interface BbConfig {
+  enabled: boolean;
+  period: number;
+  mult: number; // band half-width in standard deviations
+}
+export const BB_MIN_MULT = 0.1;
+export const BB_MAX_MULT = 10;
+export const BB_COLOR = "#64d2c8";
+export const BB_FILL = "rgba(100,210,200,0.09)";
+export const DEFAULT_BB: BbConfig = { enabled: false, period: 20, mult: 2 };
+const BB_KEY = "lifeinception.terminal.chart.bb.v1";
+
+export interface Bands {
+  mid: (number | null)[];
+  upper: (number | null)[];
+  lower: (number | null)[];
+}
+
+/**
+ * Bollinger Bands: SMA(period) ± mult × population standard deviation of the same window.
+ * Each window is computed directly (two passes) rather than from running sums, which lose precision
+ * on large prices with tiny variance. Windows containing a non-finite value are null.
+ */
+export function bollinger(values: number[], period: number, mult: number): Bands {
+  const n = values.length;
+  const mid: (number | null)[] = new Array(n).fill(null);
+  const upper: (number | null)[] = new Array(n).fill(null);
+  const lower: (number | null)[] = new Array(n).fill(null);
+  if (!Number.isInteger(period) || period < 1 || !Number.isFinite(mult) || mult < 0) return { mid, upper, lower };
+  let lastBad = -1; // index of the newest non-finite value
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(values[i])) lastBad = i;
+    if (i < period - 1 || lastBad > i - period) continue;
+    let sum = 0;
+    for (let k = i - period + 1; k <= i; k++) sum += values[k];
+    const mean = sum / period;
+    let sq = 0;
+    for (let k = i - period + 1; k <= i; k++) sq += (values[k] - mean) ** 2;
+    const sd = Math.sqrt(sq / period);
+    mid[i] = mean;
+    upper[i] = mean + mult * sd;
+    lower[i] = mean - mult * sd;
+  }
+  return { mid, upper, lower };
+}
+
+export const bollingerOf = (candles: Candle[], cfg: Pick<BbConfig, "period" | "mult">): Bands =>
+  bollinger(candles.map((c) => c.c), cfg.period, cfg.mult);
+
+export const bbLabel = (c: Pick<BbConfig, "period" | "mult">) => `BB ${c.period},${c.mult}`;
+
+export function parseBbConfig(raw: unknown): BbConfig {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const period = typeof o.period === "number" && Number.isInteger(o.period) && o.period >= MA_MIN_PERIOD && o.period <= MA_MAX_PERIOD ? o.period : DEFAULT_BB.period;
+  const mult = typeof o.mult === "number" && Number.isFinite(o.mult) && o.mult >= BB_MIN_MULT && o.mult <= BB_MAX_MULT ? o.mult : DEFAULT_BB.mult;
+  return { enabled: typeof o.enabled === "boolean" ? o.enabled : DEFAULT_BB.enabled, period, mult };
+}
+
+export function loadBbConfig(): BbConfig {
+  try {
+    const s = window.localStorage.getItem(BB_KEY);
+    return parseBbConfig(s ? JSON.parse(s) : null);
+  } catch {
+    return { ...DEFAULT_BB };
+  }
+}
+
+export function saveBbConfig(cfg: BbConfig): void {
+  try {
+    window.localStorage.setItem(BB_KEY, JSON.stringify(cfg));
+  } catch {
+    /* storage may be blocked; the setting just won't be remembered */
+  }
+}

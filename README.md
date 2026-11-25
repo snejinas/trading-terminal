@@ -28,6 +28,8 @@ Other scripts: `npm run typecheck`, `npm test`.
   readout, `Vol` button to hide them; remembered), and **moving averages** (up to three SMA/EMA lines on the
   close, default SMA 20, SMA 50 and an off EMA 200; the `MA` button sets type, period 1–500 and visibility,
   remembered). A legend shows each value at the candle under the cursor, or at the newest visible candle.
+  **Bollinger Bands** (`BB` button, off by default): SMA ± N standard deviations (population) of the close,
+  period 1–500 and 0.1–10 deviations, drawn as a shaded band with a dashed middle line and an upper/middle/lower legend.
 - **Paper account** ($100k): market and limit orders, positions, working orders, fills, P&L.
 - **Realistic fills**: market and marketable-limit orders *walk the order book* level by level and fill at the
   volume-weighted price. Your own fills deplete the book and it recovers over time (5 s half-life).
@@ -49,7 +51,7 @@ src/lib/trading/
   binance.ts                        Binance REST + WebSocket feed (history, depth, live candles)
   timeframes.ts                     timeframes, candle aggregation/folding, time formatting
   chartview.ts                      chart zoom/scroll math
-  indicators.ts                     SMA/EMA and the moving-average settings
+  indicators.ts                     SMA/EMA, Bollinger Bands and their settings
   slippage.ts                       pre-trade slippage analysis
   fees.ts                           fee tiers and settings
   backup.ts / storage.ts            account export/import and browser persistence
@@ -61,7 +63,7 @@ e2e/                                Playwright browser tests + the mocked Binanc
 
 `npm test` compiles `src/lib/trading` and runs the suites in `tests/`: fills and fees, book depletion and
 recovery, persistence validation, backup import hardening, slippage (including "estimate equals actual fill"),
-timeframes, moving averages (against naive references, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
+timeframes, moving averages and Bollinger Bands (against naive references, warm-up, bad data, settings), candle volume (including higher-timeframe volume built from the cumulative 1m stream), and
 history paging against a fake exchange.
 
 ### Browser tests (Playwright)
@@ -79,6 +81,7 @@ its order book is flat and every minute trades the same volume, which lets the t
 | --- | --- |
 | `chart-interaction` | wheel/drag/pinch/keyboard zoom and scroll, older-history paging, staying anchored to live candles |
 | `chart-timeframes` | timeframe buttons and commands, per-symbol caching, loading and failure states, simulated feed |
+| `chart-bollinger` | band values (exact, on a ramp history), legend, period/multiplier input, persistence, short history |
 | `chart-indicators` | moving-average values (exact, on a ramp history), legend, popover, persistence, short history |
 | `chart-volume` | volume pane scale, bar proportions measured from canvas pixels, toggle, higher-timeframe volume |
 | `order-ticket` | slippage estimates and warnings, two-step confirmation, `!` on the command line, depletion |
