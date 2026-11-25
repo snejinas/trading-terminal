@@ -266,3 +266,91 @@ export function saveRsiConfig(cfg: RsiConfig): void {
     /* storage may be blocked; the setting just won't be remembered */
   }
 }
+
+// ───────── Stochastic oscillator ─────────
+export interface StochConfig {
+  enabled: boolean;
+  k: number; // lookback for the raw %K
+  smooth: number; // SMA applied to raw %K (1 = "fast" stochastic, 3 = the usual "slow" one)
+  d: number; // SMA of the smoothed %K
+}
+export const STOCH_MIN_K = 2;
+export const STOCH_MAX_K = 200;
+export const STOCH_MAX_SMOOTH = 50;
+export const STOCH_K_COLOR = "#22d3ee";
+export const STOCH_D_COLOR = "#e879f9";
+export const STOCH_OVERBOUGHT = 80;
+export const STOCH_OVERSOLD = 20;
+export const DEFAULT_STOCH: StochConfig = { enabled: false, k: 14, smooth: 3, d: 3 };
+const STOCH_KEY = "lifeinception.terminal.chart.stoch.v1";
+
+/** SMA over a series that may contain nulls; a window containing a null is null. */
+function smaNullable(values: (number | null)[], period: number): (number | null)[] {
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  let lastNull = -1;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] === null) lastNull = i;
+    if (i < period - 1 || lastNull > i - period) continue;
+    let sum = 0;
+    for (let k = i - period + 1; k <= i; k++) sum += values[k] as number;
+    out[i] = sum / period;
+  }
+  return out;
+}
+
+/**
+ * Stochastic oscillator. Raw %K = 100 × (close − lowest low) / (highest high − lowest low) over `k` candles
+ * (50 when the window has no range); %K = SMA(raw, smooth); %D = SMA(%K, d). Candles with non-finite
+ * high/low/close null every window that contains them.
+ */
+export function stochastic(candles: Candle[], k: number, smooth: number, d: number): { k: (number | null)[]; d: (number | null)[] } {
+  const n = candles.length;
+  const raw: (number | null)[] = new Array(n).fill(null);
+  const ok = (p: number) => Number.isInteger(p) && p >= 1;
+  if (!ok(k) || !ok(smooth) || !ok(d)) return { k: raw.slice(), d: raw.slice() };
+  let lastBad = -1;
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    if (!Number.isFinite(c.h) || !Number.isFinite(c.l) || !Number.isFinite(c.c)) lastBad = i;
+    if (i < k - 1 || lastBad > i - k) continue;
+    let hh = -Infinity;
+    let ll = Infinity;
+    for (let j = i - k + 1; j <= i; j++) {
+      if (candles[j].h > hh) hh = candles[j].h;
+      if (candles[j].l < ll) ll = candles[j].l;
+    }
+    raw[i] = hh === ll ? 50 : Math.min(100, Math.max(0, (100 * (c.c - ll)) / (hh - ll)));
+  }
+  const kk = smaNullable(raw, smooth);
+  return { k: kk, d: smaNullable(kk, d) };
+}
+
+export const stochLabel = (c: Pick<StochConfig, "k" | "smooth" | "d">) => `Stoch ${c.k},${c.smooth},${c.d}`;
+
+export function parseStochConfig(raw: unknown): StochConfig {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const int = (v: unknown, lo: number, hi: number, def: number) => (typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi ? v : def);
+  return {
+    enabled: typeof o.enabled === "boolean" ? o.enabled : DEFAULT_STOCH.enabled,
+    k: int(o.k, STOCH_MIN_K, STOCH_MAX_K, DEFAULT_STOCH.k),
+    smooth: int(o.smooth, 1, STOCH_MAX_SMOOTH, DEFAULT_STOCH.smooth),
+    d: int(o.d, 1, STOCH_MAX_SMOOTH, DEFAULT_STOCH.d),
+  };
+}
+
+export function loadStochConfig(): StochConfig {
+  try {
+    const s = window.localStorage.getItem(STOCH_KEY);
+    return parseStochConfig(s ? JSON.parse(s) : null);
+  } catch {
+    return { ...DEFAULT_STOCH };
+  }
+}
+
+export function saveStochConfig(cfg: StochConfig): void {
+  try {
+    window.localStorage.setItem(STOCH_KEY, JSON.stringify(cfg));
+  } catch {
+    /* storage may be blocked; the setting just won't be remembered */
+  }
+}

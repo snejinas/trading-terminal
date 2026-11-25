@@ -123,8 +123,21 @@ export const chartRsi = (page: Page): Promise<RsiReading | null> =>
   });
 
 /** Heights (css px) of the RSI pane and of the price pane above it. */
-export const paneHeights = (page: Page): Promise<{ rsih: number; priceh: number; volh: number }> =>
+export const paneHeights = (page: Page): Promise<{ rsih: number; stochh: number; priceh: number; volh: number }> =>
   chartCanvas(page).evaluate((c) => {
     const d = (c as HTMLCanvasElement).dataset;
-    return { rsih: Number(d.rsih), priceh: Number(d.priceh), volh: Number(d.volh) };
+    return { rsih: Number(d.rsih), stochh: Number(d.stochh), priceh: Number(d.priceh), volh: Number(d.volh) };
+  });
+
+export interface StochReading {
+  label: string;
+  k: number | null;
+  d: number | null;
+}
+
+/** The Stochastic pane's label as drawn (null while the pane is off). */
+export const chartStoch = (page: Page): Promise<StochReading | null> =>
+  chartCanvas(page).evaluate((c) => {
+    const s = (c as HTMLCanvasElement).dataset.stoch;
+    return s ? JSON.parse(s) : null;
   });
